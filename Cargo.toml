@@ -1,0 +1,24 @@
+[package]
+name = "looper"
+version = "0.1.0"
+authors = ["Kevin B. Ridgway <kridgway@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name = "looper"
+path = "src/main.rs"
+
+[lib]
+name = "looper"
+path = "src/lib.rs"
+
+[dependencies]
+color-eyre = "0.5.11"
+directories = "3.0.2"
+play = "0.5.3"
+structopt = "0.3.21"
+
+[dev-dependencies]
+assert_cmd = "1.0.5"
