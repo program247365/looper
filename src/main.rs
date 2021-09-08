@@ -30,7 +30,7 @@ enum Command {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let opt = Opt::from_args();
-    // dbg!(&opt);
+
     match opt.cmd {
         Command::Play { url } => play_file(&url),
     }
