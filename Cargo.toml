@@ -10,10 +10,6 @@ edition = "2018"
 name = "looper"
 path = "src/main.rs"
 
-[lib]
-name = "looper"
-path = "src/lib.rs"
-
 [dependencies]
 color-eyre = "0.5.11"
 directories = "3.0.2"
