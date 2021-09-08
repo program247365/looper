@@ -1,6 +1,8 @@
 use color_eyre::eyre::Result;
-use looper::play_file;
 use structopt::StructOpt;
+
+mod play_loop;
+use play_loop::play_file;
 
 /// A CLI tool that plays songs on loop so you can get in the zone
 ///
