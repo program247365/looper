@@ -5,5 +5,5 @@
 ## Commands
 
 ```shell
-looper --url sound.mp3
+cargo run -- play --url tests/fixtures/sound.mp3 # try it out quickly
 ```
