@@ -10,6 +10,11 @@ cargo build --target=x86_64-apple-darwin --release
 
 ## Commands
 
+
 ```shell
-cargo run -- play --url tests/fixtures/sound.mp3 # try it out quickly
+looper play --url "/your/long/path/here/play_that_funky_music.mp3"
+```
+
+```shell
+cargo run -- play --url tests/fixtures/sound.mp3 # try it out quickly without building for your OS
 ```
