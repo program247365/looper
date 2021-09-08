@@ -5,5 +5,5 @@
 ## Commands
 
 ```shell
-looper --url sound.mp3
+looper play --url sound.mp3
 ```
