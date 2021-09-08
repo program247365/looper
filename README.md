@@ -4,14 +4,6 @@
 
 ## Commands
 
-### Setting the config path
-
 ```shell
-LOOPER_PATH=~/my-looper looper play
-play -p ~/my-looper play
-play --looper-path ~/my-looper play
-```
-
-```shell
-looper my_obession.mp3
+looper --url sound.mp3
 ```
