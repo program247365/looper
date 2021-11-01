@@ -4,7 +4,7 @@ use std::path::Path;
 pub fn play_file(url: &str) -> Result<()> {
     print_playing_filename(&url);
 
-    for _i in 0..=10 {
+    for _i in 0.. {
         play::play(&url)?;
     }
 
