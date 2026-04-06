@@ -12,8 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 color-eyre = "0.6.1"
+crossterm = "0.27"
+libc = "0.2"
 directories = "3.0.2"
-play = "0.5.3"
+ratatui = "0.26"
+rodio = { version = "0.17", features = ["mp3"] }
 structopt = "0.3.21"
 
 [dev-dependencies]
