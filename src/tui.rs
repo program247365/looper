@@ -26,7 +26,9 @@ pub struct AppState {
     pub loop_start: Instant,
     pub bands: Vec<f32>,
     pub prev_bands: Vec<f32>,
+    pub band_peak: Vec<f32>,
     pub fullscreen: bool,
+    pub frame_count: u64,
 }
 
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -172,7 +174,7 @@ fn draw_scatter(
                     let show = if amp > 0.001 && row_ratio <= amp {
                         let t = row_ratio / amp; // 0 at ceiling, 1 at floor
                         let density = (1.0 - t) * (1.0 - t) * 0.75;
-                        cell_noise(row, col) < density
+                        cell_noise(row, col, (state.frame_count / 4) as usize) < density
                     } else {
                         false
                     };
@@ -191,30 +193,36 @@ fn draw_scatter(
     frame.render_widget(Paragraph::new(rows), inner);
 }
 
-/// Stable per-cell pseudo-random value in [0, 1). Same (row, col) always gives
-/// the same value so the dot pattern doesn't flicker between frames.
-fn cell_noise(row: usize, col: usize) -> f32 {
-    let mut h: usize = row.wrapping_mul(2246822519).wrapping_add(col.wrapping_mul(3266489917));
+/// Per-cell pseudo-random value in [0, 1). Advances slowly with `t` (frame_count / 4)
+/// to produce gentle shimmer without flickering.
+fn cell_noise(row: usize, col: usize, t: usize) -> f32 {
+    let mut h: usize = row.wrapping_mul(2246822519)
+        .wrapping_add(col.wrapping_mul(3266489917))
+        .wrapping_add(t.wrapping_mul(1664525));
     h ^= h >> 13;
     h = h.wrapping_mul(1274126177);
     h ^= h >> 16;
     (h & 0xFFFF) as f32 / 65535.0
 }
 
-/// Warm-to-cool gradient by frequency: pink (bass) → amber → yellow → cyan (treble)
+/// Smooth warm-to-cool gradient by frequency: pink (bass) → amber → yellow → lime → cyan (treble)
 fn scatter_color(band_idx: usize, total: usize) -> Color {
-    let t = band_idx as f32 / total as f32;
-    if t < 0.20 {
-        Color::Rgb(255, 80, 130) // hot pink — bass
-    } else if t < 0.40 {
-        Color::Rgb(255, 150, 50) // amber — low-mid
-    } else if t < 0.60 {
-        Color::Rgb(220, 210, 60) // yellow — mid
-    } else if t < 0.80 {
-        Color::Rgb(120, 220, 80) // lime — high-mid
-    } else {
-        Color::Rgb(80, 200, 210) // cyan — treble
-    }
+    let t = band_idx as f32 / (total - 1).max(1) as f32;
+    let stops: [(f32, f32, f32); 5] = [
+        (255.0, 80.0, 130.0),  // pink  (bass)
+        (255.0, 150.0, 50.0),  // amber
+        (220.0, 210.0, 60.0),  // yellow
+        (120.0, 220.0, 80.0),  // lime
+        (80.0, 200.0, 210.0),  // cyan  (treble)
+    ];
+    let scaled = t * (stops.len() - 1) as f32;
+    let lo = scaled.floor() as usize;
+    let hi = (lo + 1).min(stops.len() - 1);
+    let frac = scaled - lo as f32;
+    let r = (stops[lo].0 + frac * (stops[hi].0 - stops[lo].0)).round() as u8;
+    let g = (stops[lo].1 + frac * (stops[hi].1 - stops[lo].1)).round() as u8;
+    let b = (stops[lo].2 + frac * (stops[hi].2 - stops[lo].2)).round() as u8;
+    Color::Rgb(r, g, b)
 }
 
 // ── Progress bar ──────────────────────────────────────────────────────────────

@@ -30,7 +30,9 @@ pub fn play_file(url: &str) -> Result<()> {
         loop_start: Instant::now(),
         bands: vec![0.0; N_BANDS],
         prev_bands: vec![0.0; N_BANDS],
+        band_peak: vec![0.02; N_BANDS],
         fullscreen: false,
+        frame_count: 0,
     };
 
     let mut terminal = setup_terminal()?;
@@ -60,9 +62,10 @@ fn run_loop(
             update_visualizer(state, player);
         }
 
+        state.frame_count += 1;
         terminal.draw(|f| draw(f, state))?;
 
-        if event::poll(Duration::from_millis(50))? {
+        if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -153,20 +156,23 @@ fn update_visualizer(state: &mut AppState, player: &AudioPlayer) {
             .map(|(_, v)| v.val())
             .collect();
 
+        // Use max of bins — more sensitive than mean for sparse low-freq bands
         let raw_mag = if vals.is_empty() {
             0.0
         } else {
-            vals.iter().sum::<f32>() / vals.len() as f32
+            vals.iter().cloned().fold(0.0_f32, f32::max)
         };
 
-        // Scale into a visible range and clamp; tune the multiplier if bars feel too short/tall
-        let scaled = (raw_mag * 8.0).min(1.0);
+        // Per-band AGC: track each band's historical peak with a slow decay.
+        // Normalizing against it ensures every band uses its full visual range.
+        state.band_peak[i] = (state.band_peak[i] * 0.998).max(raw_mag).max(0.02);
+        let normalized = raw_mag / state.band_peak[i];
 
-        // Asymmetric smoothing: fast attack (responsive to beats), slow decay (smooth falloff)
-        state.bands[i] = if scaled > state.prev_bands[i] {
-            0.6 * scaled + 0.4 * state.prev_bands[i]
+        // Asymmetric smoothing: fast attack, faster decay than before for snappier response
+        state.bands[i] = if normalized > state.prev_bands[i] {
+            0.6 * normalized + 0.4 * state.prev_bands[i]
         } else {
-            0.25 * scaled + 0.75 * state.prev_bands[i]
+            0.35 * normalized + 0.65 * state.prev_bands[i]
         };
         state.prev_bands[i] = state.bands[i];
     }
