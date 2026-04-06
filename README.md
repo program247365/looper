@@ -2,6 +2,8 @@
 
 > A CLI tool that plays a song on loop so you can get in the zone — with a real-time FFT visualizer.
 
+![Looper fullscreen visualizer](screenshots/looper.png)
+
 ## Install
 
 ### Homebrew (recommended)
