@@ -24,11 +24,23 @@ pub struct AppState {
     pub paused: bool,
     pub loop_count: u64,
     pub loop_start: Instant,
+    pub pause_elapsed: Duration,
     pub bands: Vec<f32>,
     pub prev_bands: Vec<f32>,
     pub band_peak: Vec<f32>,
     pub fullscreen: bool,
     pub frame_count: u64,
+}
+
+impl AppState {
+    /// Playback-aware elapsed time: freezes when paused.
+    pub fn elapsed(&self) -> Duration {
+        if self.paused {
+            self.pause_elapsed
+        } else {
+            self.loop_start.elapsed()
+        }
+    }
 }
 
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -228,7 +240,7 @@ fn scatter_color(band_idx: usize, total: usize) -> Color {
 // ── Progress bar ──────────────────────────────────────────────────────────────
 
 fn draw_progress(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
-    let elapsed = state.loop_start.elapsed();
+    let elapsed = state.elapsed();
 
     let time_label = match state.duration {
         Some(dur) if dur.as_secs() > 0 => {
@@ -314,7 +326,7 @@ fn draw_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
 // ── Fullscreen micro status ───────────────────────────────────────────────────
 
 fn draw_micro_status(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
-    let elapsed = state.loop_start.elapsed().as_secs();
+    let elapsed = state.elapsed().as_secs();
     let time_str = match state.duration {
         Some(dur) if dur.as_secs() > 0 => {
             let t = dur.as_secs();

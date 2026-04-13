@@ -28,6 +28,7 @@ pub fn play_file(url: &str) -> Result<()> {
         paused: false,
         loop_count: 1,
         loop_start: Instant::now(),
+        pause_elapsed: Duration::default(),
         bands: vec![0.0; N_BANDS],
         prev_bands: vec![0.0; N_BANDS],
         band_peak: vec![0.02; N_BANDS],
@@ -73,8 +74,10 @@ fn run_loop(
                     }
                     (KeyCode::Char(' '), _) => {
                         if state.paused {
+                            state.loop_start = Instant::now() - state.pause_elapsed;
                             player.resume();
                         } else {
+                            state.pause_elapsed = state.loop_start.elapsed();
                             player.pause();
                         }
                         state.paused = !state.paused;
@@ -92,7 +95,7 @@ fn run_loop(
         // repeat_infinite() doesn't reset the sink position between loops.
         if !state.paused {
             if let Some(dur) = state.duration {
-                if state.loop_start.elapsed() >= dur {
+                if state.elapsed() >= dur {
                     state.loop_count += 1;
                     state.loop_start = Instant::now();
                 }
