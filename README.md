@@ -1,6 +1,6 @@
 # Looper
 
-> A CLI audio looper with a real-time FFT visualizer, startup screen, playback history, favorites, fullscreen mode, and online URL support.
+> A CLI audio looper with a real-time FFT visualizer, startup screen, default history browser, favorites, fullscreen mode, and online URL support.
 
 ![Looper fullscreen visualizer](screenshots/looper.png)
 
@@ -20,6 +20,7 @@ It supports:
 - pause / resume
 - fullscreen visualizer
 - centered ASCII startup/loading screen with cheeky boot logs
+- default no-arg startup into playlist history
 - SQLite-backed playback history and favorites
 - remote download/loading UI with progress, speed, and ETA
 - small source badges in the TUI for supported services (`YT`, `SC`, `HM`)
@@ -78,6 +79,8 @@ looper
 
 This opens the playlist history browser with no active playback. Press `Enter` on a row to start playing it.
 
+If you want to skip the browser and jump straight into playback, use `looper play --url ...`.
+
 ### Local file
 
 ```shell
@@ -128,6 +131,7 @@ Current behavior is intentionally pragmatic:
 - playback history and favorites are stored in a local SQLite database
 - the database lives in the OS data directory for `looper`
 - startup applies pending embedded migrations automatically
+- bare `looper` loads this history first and lets you replay from it
 - history is tracked per playable URL or canonical local file path
 - each track stores title, platform, favorite state, last played timestamp, play count, and cumulative time played
 
@@ -135,6 +139,7 @@ Current behavior is intentionally pragmatic:
 
 | Key | Action |
 |-----|--------|
+| `Enter` | Replay the selected track from the default history browser |
 | `Space` | Pause / Resume |
 | `f` | Toggle fullscreen visualizer |
 | `s` | Toggle favorite for the currently playing track |
