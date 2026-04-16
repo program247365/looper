@@ -17,11 +17,6 @@ impl ServicePlugin for YouTube {
 
     fn resolve(&self, url: &str, cache_dir: &Path) -> Result<Vec<TrackInfo>> {
         let normalized = normalize_youtube_url(url);
-        if normalized != url {
-            eprintln!(
-                "YouTube URL includes both a video and a playlist. looper will play the single video and ignore the playlist context. If you intended playlist playback, use the playlist URL directly. Private playlists cannot be accessed by yt-dlp."
-            );
-        }
         ytdlp::resolve_url(&normalized, cache_dir, "YouTube")
     }
 }
