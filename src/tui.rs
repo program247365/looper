@@ -156,6 +156,60 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
     );
 }
 
+pub fn draw_history_browser(frame: &mut ratatui::Frame, panel: &HistoryPanelState) {
+    let area = frame.size();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+    let header = vec![
+        Line::from(vec![
+            Span::styled(
+                "Playlist History",
+                Style::default()
+                    .fg(Color::Rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  •  enter replay  j/k move  h/l sort  r reverse  s star  q quit",
+                Style::default().fg(Color::Rgb(150, 150, 170)),
+            ),
+        ]),
+        Line::from(vec![Span::styled(
+            "No track is playing. Pick something from history to start the loop.",
+            Style::default().fg(Color::Rgb(180, 180, 200)),
+        )]),
+    ];
+    frame.render_widget(
+        Paragraph::new(header).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .style(Style::default().fg(Color::Rgb(90, 90, 120))),
+        ),
+        chunks[0],
+    );
+
+    draw_history_table(
+        frame,
+        chunks[1],
+        panel,
+        "Played Songs",
+        "Tiny jukebox historian online. It remembers everything, especially your repeats.",
+    );
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(vec![Span::styled(
+            "Bare `looper` now opens here first. `looper play --url ...` still jumps straight into playback.",
+            Style::default().fg(Color::Rgb(120, 120, 145)),
+        )])]),
+        chunks[2],
+    );
+}
+
 fn draw_normal(frame: &mut ratatui::Frame, state: &AppState) {
     let area = frame.size();
 
@@ -668,7 +722,22 @@ fn favorite_badge(is_favorite: bool) -> Span<'static> {
 fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &HistoryPanelState) {
     let area = centered_rect(88, 72, frame.size());
     frame.render_widget(Clear, area);
+    draw_history_table(
+        frame,
+        area,
+        panel,
+        "Played Songs",
+        "Tiny jukebox historian online. It remembers everything, especially your repeats.",
+    );
+}
 
+fn draw_history_table(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    panel: &HistoryPanelState,
+    title_label: &str,
+    footer_text: &str,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Rgb(90, 90, 120)));
@@ -685,10 +754,15 @@ fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &His
         .split(inner);
 
     let title = format!(
-        "Played Songs  •  sort: {} {}",
+        "{title_label}  •  sort: {} {}",
         panel.sort_field.label(),
         if panel.descending { "↓" } else { "↑" }
     );
+    let controls = if area == frame.size() {
+        "  •  j/k move  h/l sort  r reverse  s star  enter replay  q quit"
+    } else {
+        "  •  j/k move  h/l sort  r reverse  s star  enter replay  p/esc close"
+    };
     let header = vec![Line::from(vec![
         Span::styled(
             title,
@@ -696,17 +770,14 @@ fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &His
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "  •  j/k move  h/l sort  r reverse  s star  enter replay  p/esc close",
-            Style::default().fg(Color::Rgb(150, 150, 170)),
-        ),
+        Span::styled(controls, Style::default().fg(Color::Rgb(150, 150, 170))),
     ])];
     frame.render_widget(Paragraph::new(header), chunks[0]);
 
     let mut rows = Vec::new();
     if panel.rows.is_empty() {
         rows.push(Line::from(vec![Span::styled(
-            "No songs played yet. Give the speakers something to gossip about.",
+            "No songs played yet. Play something once and it will show up here.",
             Style::default().fg(Color::Rgb(180, 180, 200)),
         )]));
     } else {
@@ -753,7 +824,7 @@ fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &His
     frame.render_widget(Paragraph::new(rows), chunks[1]);
     frame.render_widget(
         Paragraph::new(vec![Line::from(vec![Span::styled(
-            "Tiny jukebox historian online. It remembers everything, especially your repeats.",
+            footer_text,
             Style::default().fg(Color::Rgb(120, 120, 145)),
         )])]),
         chunks[2],

@@ -70,6 +70,14 @@ If YouTube playback starts failing with `403` errors, update `yt-dlp` first.
 
 ## Usage
 
+### Default startup
+
+```shell
+looper
+```
+
+This opens the playlist history browser with no active playback. Press `Enter` on a row to start playing it.
+
 ### Local file
 
 ```shell
@@ -136,7 +144,7 @@ Current behavior is intentionally pragmatic:
 
 ### Played-Songs Panel
 
-The played-songs panel is hidden by default and opens over the minimal UI.
+Bare `looper` opens directly into playlist history. During playback, the played-songs panel is hidden by default and opens over the minimal UI.
 
 | Key | Action |
 |-----|--------|

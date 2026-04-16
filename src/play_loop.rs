@@ -24,11 +24,25 @@ use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, ytdlp, TrackInfo};
 use crate::storage::{track_record, HistorySortField, SharedStorage, Storage};
 use crate::tui::{
-    draw, draw_startup, restore_terminal, setup_terminal, AppState, HistoryPanelState,
-    StartupScreenState, N_BANDS,
+    draw, draw_history_browser, draw_startup, restore_terminal, setup_terminal, AppState,
+    HistoryPanelState, StartupScreenState, N_BANDS,
 };
 
+pub fn browse_history() -> Result<()> {
+    run_terminal_session(|terminal, title_state| browse_history_session(terminal, title_state))
+}
+
 pub fn play_file(url: &str) -> Result<()> {
+    run_terminal_session(|terminal, title_state| play_file_session(terminal, title_state, url))
+}
+
+fn run_terminal_session<F>(session: F) -> Result<()>
+where
+    F: FnOnce(
+        &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+        &mut TitleState,
+    ) -> Result<()>,
+{
     #[cfg(unix)]
     reattach_stdin_to_tty()?;
 
@@ -44,11 +58,83 @@ pub fn play_file(url: &str) -> Result<()> {
         orig_hook(info);
     }));
 
-    let result = play_file_session(&mut terminal, &mut title_state, url);
+    let result = session(&mut terminal, &mut title_state);
 
     let _ = title_state.reset();
     restore_terminal(&mut terminal)?;
     result
+}
+
+fn browse_history_session(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+) -> Result<()> {
+    let mut startup = StartupScreenState {
+        status: "db migrations... teaching SQLite to keep a beat".to_string(),
+        logs: startup_logs(),
+        frame_count: 0,
+    };
+    title_state.set("looper — playlist history".to_string())?;
+    terminal.draw(|frame| draw_startup(frame, &startup))?;
+
+    let storage = Storage::open_and_migrate()?.shared();
+    let mut panel = HistoryPanelState {
+        rows: Vec::new(),
+        selected: 0,
+        sort_field: HistorySortField::TimePlayed,
+        descending: true,
+    };
+    refresh_history_panel(&mut panel, &storage)?;
+
+    loop {
+        startup.frame_count += 1;
+        title_state.set("looper — playlist history".to_string())?;
+        terminal.draw(|frame| draw_history_browser(frame, &panel))?;
+
+        if event::poll(Duration::from_millis(30))? {
+            if let Event::Key(key) = event::read()? {
+                match handle_history_browser_key_event(key, &panel) {
+                    KeyCommand::Quit => return Ok(()),
+                    KeyCommand::HistoryNext => {
+                        if panel.selected + 1 < panel.rows.len() {
+                            panel.selected += 1;
+                        }
+                    }
+                    KeyCommand::HistoryPrev => {
+                        panel.selected = panel.selected.saturating_sub(1);
+                    }
+                    KeyCommand::HistorySortNext => {
+                        panel.sort_field = panel.sort_field.next();
+                        refresh_history_panel(&mut panel, &storage)?;
+                    }
+                    KeyCommand::HistorySortPrev => {
+                        panel.sort_field = panel.sort_field.previous();
+                        refresh_history_panel(&mut panel, &storage)?;
+                    }
+                    KeyCommand::HistoryReverse => {
+                        panel.descending = !panel.descending;
+                        refresh_history_panel(&mut panel, &storage)?;
+                    }
+                    KeyCommand::HistoryToggleFavorite => {
+                        if let Some(row) = panel.rows.get(panel.selected) {
+                            storage.lock().unwrap().toggle_favorite(&row.track_key)?;
+                            refresh_history_panel(&mut panel, &storage)?;
+                        }
+                    }
+                    KeyCommand::HistoryReplay => {
+                        if let Some(row) = panel.rows.get(panel.selected) {
+                            return play_file_session(terminal, title_state, &row.replay_target);
+                        }
+                    }
+                    KeyCommand::None
+                    | KeyCommand::TogglePause
+                    | KeyCommand::ToggleFullscreen
+                    | KeyCommand::ToggleFavorite
+                    | KeyCommand::ToggleHistory => {}
+                }
+            }
+        }
+    }
 }
 
 fn play_file_session(
@@ -310,6 +396,20 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
             (KeyCode::Char('p'), _) => KeyCommand::ToggleHistory,
             _ => KeyCommand::None,
         }
+    }
+}
+
+fn handle_history_browser_key_event(key: KeyEvent, panel: &HistoryPanelState) -> KeyCommand {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('j'), _) => KeyCommand::HistoryNext,
+        (KeyCode::Char('k'), _) => KeyCommand::HistoryPrev,
+        (KeyCode::Char('l'), _) => KeyCommand::HistorySortNext,
+        (KeyCode::Char('h'), _) => KeyCommand::HistorySortPrev,
+        (KeyCode::Char('r'), _) => KeyCommand::HistoryReverse,
+        (KeyCode::Char('s'), _) if !panel.rows.is_empty() => KeyCommand::HistoryToggleFavorite,
+        (KeyCode::Enter, _) if !panel.rows.is_empty() => KeyCommand::HistoryReplay,
+        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyCommand::Quit,
+        _ => KeyCommand::None,
     }
 }
 
@@ -1096,6 +1196,59 @@ mod tests {
                 &state
             ),
             KeyCommand::HistorySortNext
+        );
+    }
+
+    #[test]
+    fn history_browser_uses_replay_and_quit_keys() {
+        let panel = HistoryPanelState {
+            rows: vec![HistoryRow {
+                track_key: "a".into(),
+                replay_target: "a".into(),
+                title: "A".into(),
+                platform: "Local".into(),
+                is_favorite: false,
+                play_count: 1,
+                total_play_seconds: 10,
+                first_played_at: 0,
+                last_played_at: 0,
+            }],
+            selected: 0,
+            sort_field: HistorySortField::TimePlayed,
+            descending: true,
+        };
+
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::HistoryReplay
+        );
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::Quit
+        );
+    }
+
+    #[test]
+    fn history_browser_ignores_replay_when_empty() {
+        let panel = HistoryPanelState {
+            rows: Vec::new(),
+            selected: 0,
+            sort_field: HistorySortField::TimePlayed,
+            descending: true,
+        };
+
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::None
         );
     }
 }
