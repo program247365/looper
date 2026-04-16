@@ -29,9 +29,18 @@ It supports:
 
 ### Homebrew
 
+Fresh install:
+
 ```shell
 brew tap program247365/tap
 brew install looper
+```
+
+Upgrade an existing install:
+
+```shell
+brew update
+brew upgrade program247365/tap/looper
 ```
 
 ### Build from source
@@ -112,7 +121,7 @@ Current behavior is intentionally pragmatic:
 - the database lives in the OS data directory for `looper`
 - startup applies pending embedded migrations automatically
 - history is tracked per playable URL or canonical local file path
-- each track stores title, platform, favorite state, last played timestamp, and play count
+- each track stores title, platform, favorite state, last played timestamp, play count, and cumulative time played
 
 ## Keys
 
@@ -140,6 +149,7 @@ The played-songs panel is hidden by default and opens over the minimal UI.
 
 Sort fields:
 
+- time played
 - last played
 - platform
 - title
