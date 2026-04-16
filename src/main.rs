@@ -6,6 +6,8 @@ mod download;
 mod play_loop;
 mod playback_input;
 mod plugin;
+mod schema;
+mod storage;
 mod tui;
 use play_loop::play_file;
 

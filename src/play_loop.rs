@@ -1,6 +1,6 @@
 use color_eyre::eyre::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, LeaveAlternateScreen},
 };
@@ -22,28 +22,88 @@ use crate::audio::AudioPlayer;
 use crate::download::{DownloadEvent, LoadingPhase, LoadingState};
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, ytdlp, TrackInfo};
-use crate::tui::{draw, draw_loading, restore_terminal, setup_terminal, AppState, N_BANDS};
+use crate::storage::{track_record, HistorySortField, SharedStorage, Storage};
+use crate::tui::{
+    draw, draw_loading, draw_startup, restore_terminal, setup_terminal, AppState,
+    HistoryPanelState, StartupScreenState, N_BANDS,
+};
 
 pub fn play_file(url: &str) -> Result<()> {
     #[cfg(unix)]
     reattach_stdin_to_tty()?;
 
-    match plugin::resolve_url(url)? {
-        None => play_tracks(
-            None,
-            vec![TrackInfo {
-                title: extract_filename(url),
-                duration_secs: None,
-                playback: PlaybackInput::file(url),
-                source_url: None,
-                pending_download: None,
-                service: None,
-            }],
-            false,
-        ),
-        Some(tracks) => {
-            let is_playlist = tracks.len() > 1;
-            play_tracks(Some(url), tracks, is_playlist)
+    let mut terminal = setup_terminal()?;
+    let mut title_state = TitleState::new();
+
+    // Wrap color_eyre's panic hook so the terminal is restored before the
+    // panic message is printed.
+    let orig_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+        orig_hook(info);
+    }));
+
+    let result = play_file_session(&mut terminal, &mut title_state, url);
+
+    let _ = title_state.reset();
+    restore_terminal(&mut terminal)?;
+    result
+}
+
+fn play_file_session(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+    initial_url: &str,
+) -> Result<()> {
+    let mut current_url = initial_url.to_string();
+    let mut startup = StartupScreenState {
+        status: "db migrations... teaching SQLite to keep a beat".to_string(),
+        logs: startup_logs(),
+        frame_count: 0,
+    };
+    title_state.set("looper — booting".to_string())?;
+    terminal.draw(|frame| draw_startup(frame, &startup))?;
+    let storage = Storage::open_and_migrate()?.shared();
+
+    loop {
+        startup.frame_count += 1;
+        startup.status = format!("loading song... bribing the aux cord for `{current_url}`");
+        title_state.set("looper — loading song".to_string())?;
+        terminal.draw(|frame| draw_startup(frame, &startup))?;
+
+        let next = match plugin::resolve_url(&current_url)? {
+            None => play_tracks(
+                terminal,
+                title_state,
+                storage.clone(),
+                None,
+                vec![TrackInfo {
+                    title: extract_filename(&current_url),
+                    duration_secs: None,
+                    playback: PlaybackInput::file(&current_url),
+                    source_url: None,
+                    pending_download: None,
+                    service: None,
+                }],
+                false,
+            )?,
+            Some(tracks) => {
+                let is_playlist = tracks.len() > 1;
+                play_tracks(
+                    terminal,
+                    title_state,
+                    storage.clone(),
+                    Some(current_url.as_str()),
+                    tracks,
+                    is_playlist,
+                )?
+            }
+        };
+
+        match next {
+            Some(replay_target) => current_url = replay_target,
+            None => return Ok(()),
         }
     }
 }
@@ -51,6 +111,7 @@ pub fn play_file(url: &str) -> Result<()> {
 enum LoopAction {
     Quit,
     NextTrack,
+    ReplayTarget(String),
 }
 
 struct TitleState {
@@ -81,6 +142,8 @@ fn run_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     state: &mut AppState,
     player: &AudioPlayer,
+    track: &TrackInfo,
+    storage: SharedStorage,
     title_state: &mut TitleState,
 ) -> Result<LoopAction> {
     loop {
@@ -98,11 +161,9 @@ fn run_loop(
 
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        return Ok(LoopAction::Quit);
-                    }
-                    (KeyCode::Char(' '), _) => {
+                match handle_key_event(key, state) {
+                    KeyCommand::Quit => return Ok(LoopAction::Quit),
+                    KeyCommand::TogglePause => {
                         if state.paused {
                             state.loop_start = Instant::now() - state.pause_elapsed;
                             player.resume();
@@ -112,10 +173,77 @@ fn run_loop(
                         }
                         state.paused = !state.paused;
                     }
-                    (KeyCode::Char('f'), _) => {
+                    KeyCommand::ToggleFullscreen => {
                         state.fullscreen = !state.fullscreen;
                     }
-                    _ => {}
+                    KeyCommand::ToggleFavorite => {
+                        if let Ok(record) = track_record(track) {
+                            let favorite =
+                                storage.lock().unwrap().toggle_favorite(&record.track_key)?;
+                            state.is_favorite = favorite;
+                            if let Some(panel) = state.history_panel.as_mut() {
+                                refresh_history_panel(panel, &storage)?;
+                            }
+                        }
+                    }
+                    KeyCommand::ToggleHistory => {
+                        toggle_history_panel(state, &storage)?;
+                    }
+                    KeyCommand::HistoryNext => {
+                        if let Some(panel) = state.history_panel.as_mut() {
+                            if panel.selected + 1 < panel.rows.len() {
+                                panel.selected += 1;
+                            }
+                        }
+                    }
+                    KeyCommand::HistoryPrev => {
+                        if let Some(panel) = state.history_panel.as_mut() {
+                            panel.selected = panel.selected.saturating_sub(1);
+                        }
+                    }
+                    KeyCommand::HistorySortNext => {
+                        if let Some(panel) = state.history_panel.as_mut() {
+                            panel.sort_field = panel.sort_field.next();
+                            refresh_history_panel(panel, &storage)?;
+                        }
+                    }
+                    KeyCommand::HistorySortPrev => {
+                        if let Some(panel) = state.history_panel.as_mut() {
+                            panel.sort_field = panel.sort_field.previous();
+                            refresh_history_panel(panel, &storage)?;
+                        }
+                    }
+                    KeyCommand::HistoryReverse => {
+                        if let Some(panel) = state.history_panel.as_mut() {
+                            panel.descending = !panel.descending;
+                            refresh_history_panel(panel, &storage)?;
+                        }
+                    }
+                    KeyCommand::HistoryReplay => {
+                        if let Some(panel) = &state.history_panel {
+                            if let Some(row) = panel.rows.get(panel.selected) {
+                                return Ok(LoopAction::ReplayTarget(row.replay_target.clone()));
+                            }
+                        }
+                    }
+                    KeyCommand::HistoryToggleFavorite => {
+                        if let Some(panel) = state.history_panel.as_mut() {
+                            if let Some(row) = panel.rows.get(panel.selected) {
+                                let selected_key = row.track_key.clone();
+                                storage.lock().unwrap().toggle_favorite(&selected_key)?;
+                                refresh_history_panel(panel, &storage)?;
+                                if let Ok(record) = track_record(track) {
+                                    if record.track_key == selected_key {
+                                        state.is_favorite = storage
+                                            .lock()
+                                            .unwrap()
+                                            .favorite_for(&record.track_key)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    KeyCommand::None => {}
                 }
             }
         }
@@ -133,6 +261,86 @@ fn run_loop(
             }
         }
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum KeyCommand {
+    None,
+    Quit,
+    TogglePause,
+    ToggleFullscreen,
+    ToggleFavorite,
+    ToggleHistory,
+    HistoryNext,
+    HistoryPrev,
+    HistorySortNext,
+    HistorySortPrev,
+    HistoryReverse,
+    HistoryReplay,
+    HistoryToggleFavorite,
+}
+
+fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
+    if state.history_panel.is_some() {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('p'), _) => KeyCommand::ToggleHistory,
+            (KeyCode::Char('j'), _) => KeyCommand::HistoryNext,
+            (KeyCode::Char('k'), _) => KeyCommand::HistoryPrev,
+            (KeyCode::Char('l'), _) => KeyCommand::HistorySortNext,
+            (KeyCode::Char('h'), _) => KeyCommand::HistorySortPrev,
+            (KeyCode::Char('r'), _) => KeyCommand::HistoryReverse,
+            (KeyCode::Char('s'), _) => KeyCommand::HistoryToggleFavorite,
+            (KeyCode::Enter, _) => KeyCommand::HistoryReplay,
+            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                KeyCommand::Quit
+            }
+            _ => KeyCommand::None,
+        }
+    } else {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                KeyCommand::Quit
+            }
+            (KeyCode::Char(' '), _) => KeyCommand::TogglePause,
+            (KeyCode::Char('f'), _) => KeyCommand::ToggleFullscreen,
+            (KeyCode::Char('s'), _) => KeyCommand::ToggleFavorite,
+            (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+                KeyCommand::ToggleHistory
+            }
+            (KeyCode::Char('p'), _) => KeyCommand::ToggleHistory,
+            _ => KeyCommand::None,
+        }
+    }
+}
+
+fn toggle_history_panel(state: &mut AppState, storage: &SharedStorage) -> Result<()> {
+    if state.history_panel.is_some() {
+        state.history_panel = None;
+        return Ok(());
+    }
+
+    let mut panel = HistoryPanelState {
+        rows: Vec::new(),
+        selected: 0,
+        sort_field: HistorySortField::LastPlayed,
+        descending: true,
+    };
+    refresh_history_panel(&mut panel, storage)?;
+    state.history_panel = Some(panel);
+    Ok(())
+}
+
+fn refresh_history_panel(panel: &mut HistoryPanelState, storage: &SharedStorage) -> Result<()> {
+    panel.rows = storage
+        .lock()
+        .unwrap()
+        .list_history(panel.sort_field, panel.descending)?;
+    if panel.rows.is_empty() {
+        panel.selected = 0;
+    } else {
+        panel.selected = panel.selected.min(panel.rows.len() - 1);
+    }
+    Ok(())
 }
 
 /// Reads the latest samples from the audio tap, runs FFT via spectrum-analyzer,
@@ -235,44 +443,40 @@ fn extract_filename(url: &str) -> String {
         .to_string()
 }
 
-fn play_tracks(source_url: Option<&str>, tracks: Vec<TrackInfo>, is_playlist: bool) -> Result<()> {
-    let mut terminal = setup_terminal()?;
-    let mut title_state = TitleState::new();
-
-    // Wrap color_eyre's panic hook so the terminal is restored before the
-    // panic message is printed.
-    let orig_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
-        orig_hook(info);
-    }));
-
-    let result = if is_playlist {
-        loop_playlist(&mut terminal, source_url, tracks, &mut title_state)
+fn play_tracks(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+    storage: SharedStorage,
+    source_url: Option<&str>,
+    tracks: Vec<TrackInfo>,
+    is_playlist: bool,
+) -> Result<Option<String>> {
+    if is_playlist {
+        loop_playlist(terminal, source_url, tracks, storage, title_state)
     } else {
-        play_single_track(
-            &mut terminal,
+        match play_single_track(
+            terminal,
             tracks[0].clone(),
             1,
             1,
             false,
-            &mut title_state,
-        )
-        .map(|_| ())
-    };
-
-    let _ = title_state.reset();
-    restore_terminal(&mut terminal)?;
-    result
+            storage,
+            title_state,
+        )? {
+            LoopAction::Quit => Ok(None),
+            LoopAction::NextTrack => Ok(None),
+            LoopAction::ReplayTarget(target) => Ok(Some(target)),
+        }
+    }
 }
 
 fn loop_playlist(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     source_url: Option<&str>,
     initial_tracks: Vec<TrackInfo>,
+    storage: SharedStorage,
     title_state: &mut TitleState,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let mut tracks = initial_tracks;
     loop {
         let shared_tracks = Arc::new(Mutex::new(tracks));
@@ -289,9 +493,18 @@ fn loop_playlist(
                 tracks[idx].clone()
             };
 
-            match play_single_track(terminal, track, idx + 1, total_tracks, true, title_state)? {
-                LoopAction::Quit => return Ok(()),
+            match play_single_track(
+                terminal,
+                track,
+                idx + 1,
+                total_tracks,
+                true,
+                storage.clone(),
+                title_state,
+            )? {
+                LoopAction::Quit => return Ok(None),
                 LoopAction::NextTrack => continue,
+                LoopAction::ReplayTarget(target) => return Ok(Some(target)),
             }
         }
 
@@ -310,6 +523,7 @@ fn play_single_track(
     track_index: usize,
     total_tracks: usize,
     is_playlist: bool,
+    storage: SharedStorage,
     title_state: &mut TitleState,
 ) -> Result<LoopAction> {
     if prepare_track_for_playback(
@@ -324,10 +538,17 @@ fn play_single_track(
     }
 
     let player = AudioPlayer::new(track.playback.clone(), !is_playlist)?;
+    let record = track_record(&track)?;
+    {
+        let storage = storage.lock().unwrap();
+        storage.record_play(&record)?;
+    }
+    let is_favorite = storage.lock().unwrap().favorite_for(&record.track_key)?;
 
     let mut state = AppState {
         filename: track.title.clone(),
         service: track.service.clone(),
+        is_favorite,
         duration: player
             .duration
             .or_else(|| track.duration_secs.map(Duration::from_secs_f64)),
@@ -344,9 +565,10 @@ fn play_single_track(
         fullscreen: false,
         frame_count: 0,
         cache_status: None,
+        history_panel: None,
     };
 
-    run_loop(terminal, &mut state, &player, title_state)
+    run_loop(terminal, &mut state, &player, &track, storage, title_state)
 }
 
 struct PrefetchWorker {
@@ -551,4 +773,103 @@ fn write_terminal_title(title: &str) -> Result<()> {
     write!(out, "\x1b]0;{}\x07", title)?;
     out.flush()?;
     Ok(())
+}
+
+fn startup_logs() -> Vec<String> {
+    vec![
+        "warming up the loop engine".to_string(),
+        "convincing sqlite this is definitely a music venue".to_string(),
+        "dusting fingerprints off the play count ledger".to_string(),
+        "aligning vibes, bits, and questionable dance moves".to_string(),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::HistoryRow;
+
+    fn base_state() -> AppState {
+        AppState {
+            filename: "song".into(),
+            service: Some("YouTube".into()),
+            is_favorite: false,
+            duration: None,
+            paused: false,
+            loop_count: 1,
+            track_index: 1,
+            total_tracks: 1,
+            is_playlist: false,
+            loop_start: Instant::now(),
+            pause_elapsed: Duration::default(),
+            bands: vec![0.0; N_BANDS],
+            prev_bands: vec![0.0; N_BANDS],
+            band_peak: vec![0.02; N_BANDS],
+            fullscreen: false,
+            frame_count: 0,
+            cache_status: None,
+            history_panel: None,
+        }
+    }
+
+    #[test]
+    fn plain_p_opens_history() {
+        let state = base_state();
+        assert_eq!(
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+                &state
+            ),
+            KeyCommand::ToggleHistory
+        );
+    }
+
+    #[test]
+    fn history_uses_vim_keys() {
+        let mut state = base_state();
+        state.history_panel = Some(HistoryPanelState {
+            rows: vec![HistoryRow {
+                track_key: "a".into(),
+                replay_target: "a".into(),
+                title: "A".into(),
+                platform: "Local".into(),
+                is_favorite: false,
+                play_count: 1,
+                first_played_at: 0,
+                last_played_at: 0,
+            }],
+            selected: 0,
+            sort_field: HistorySortField::LastPlayed,
+            descending: true,
+        });
+
+        assert_eq!(
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                &state
+            ),
+            KeyCommand::HistoryNext
+        );
+        assert_eq!(
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                &state
+            ),
+            KeyCommand::HistoryPrev
+        );
+        assert_eq!(
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                &state
+            ),
+            KeyCommand::HistorySortPrev
+        );
+        assert_eq!(
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+                &state
+            ),
+            KeyCommand::HistorySortNext
+        );
+    }
 }

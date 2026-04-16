@@ -1,3 +1,4 @@
+use chrono::{Local, TimeZone};
 use color_eyre::eyre::Result;
 use crossterm::{
     execute,
@@ -8,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
 use std::{
@@ -19,6 +20,7 @@ use std::{
 use crate::download::{
     format_bytes, format_eta, format_speed, CacheStatus, LoadingPhase, LoadingState,
 };
+use crate::storage::{HistoryRow, HistorySortField};
 
 pub const N_BANDS: usize = 32;
 const PROGRESS_KNOB: char = '•';
@@ -26,6 +28,7 @@ const PROGRESS_KNOB: char = '•';
 pub struct AppState {
     pub filename: String,
     pub service: Option<String>,
+    pub is_favorite: bool,
     pub duration: Option<Duration>,
     pub paused: bool,
     pub loop_count: u64,
@@ -40,6 +43,22 @@ pub struct AppState {
     pub fullscreen: bool,
     pub frame_count: u64,
     pub cache_status: Option<CacheStatus>,
+    pub history_panel: Option<HistoryPanelState>,
+}
+
+#[derive(Clone)]
+pub struct HistoryPanelState {
+    pub rows: Vec<HistoryRow>,
+    pub selected: usize,
+    pub sort_field: HistorySortField,
+    pub descending: bool,
+}
+
+#[derive(Clone)]
+pub struct StartupScreenState {
+    pub status: String,
+    pub logs: Vec<String>,
+    pub frame_count: u64,
 }
 
 impl AppState {
@@ -73,6 +92,10 @@ pub fn draw(frame: &mut ratatui::Frame, state: &AppState) {
     } else {
         draw_normal(frame, state);
     }
+
+    if let Some(panel) = &state.history_panel {
+        draw_history_panel(frame, state, panel);
+    }
 }
 
 pub fn draw_loading(frame: &mut ratatui::Frame, state: &LoadingState) {
@@ -94,6 +117,66 @@ pub fn draw_loading(frame: &mut ratatui::Frame, state: &LoadingState) {
     draw_loading_meta(frame, chunks[3], state);
     draw_loading_ambient(frame, chunks[4], state);
     draw_loading_footer(frame, chunks[5]);
+}
+
+pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
+    let area = frame.size();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(16),
+            Constraint::Length(2),
+            Constraint::Length(5),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    let title = vec![
+        Line::from("  _                              "),
+        Line::from(" | |    ___   ___  _ __   ___ _ __ "),
+        Line::from(" | |   / _ \\ / _ \\| '_ \\ / _ \\ '__|"),
+        Line::from(" | |__| (_) | (_) | |_) |  __/ |   "),
+        Line::from(" |_____\\___/ \\___/| .__/ \\___|_|   "),
+        Line::from("                  |_|              "),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(title).alignment(Alignment::Center).style(
+            Style::default()
+                .fg(Color::Rgb(255, 180, 80))
+                .add_modifier(Modifier::BOLD),
+        ),
+        chunks[1],
+    );
+
+    let spinner = spinner_frame(state.frame_count);
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(vec![
+            Span::styled(
+                format!("{spinner} "),
+                Style::default().fg(Color::Rgb(120, 220, 80)),
+            ),
+            Span::styled(&state.status, Style::default().fg(Color::White)),
+        ])])
+        .alignment(Alignment::Center),
+        chunks[2],
+    );
+
+    let log_lines = state
+        .logs
+        .iter()
+        .map(|line| {
+            Line::from(vec![
+                Span::styled("• ", Style::default().fg(Color::Rgb(255, 160, 50))),
+                Span::styled(line, Style::default().fg(Color::Rgb(180, 180, 200))),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(log_lines).alignment(Alignment::Center),
+        chunks[3],
+    );
 }
 
 fn draw_normal(frame: &mut ratatui::Frame, state: &AppState) {
@@ -165,6 +248,8 @@ fn draw_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &
             Span::styled("  ♪  ", Style::default().fg(Color::Rgb(255, 180, 80))),
             service_badge,
             Span::raw(" "),
+            favorite_badge(state.is_favorite),
+            Span::raw(if state.is_favorite { " " } else { "" }),
             Span::styled(
                 state.filename.clone(),
                 Style::default()
@@ -482,6 +567,10 @@ fn draw_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         Span::raw(" Pause/Resume   "),
         Span::styled("[f]", Style::default().fg(Color::Rgb(255, 160, 50))),
         Span::raw(" Fullscreen   "),
+        Span::styled("[s]", Style::default().fg(Color::Rgb(255, 160, 50))),
+        Span::raw(" Favorite   "),
+        Span::styled("[p]", Style::default().fg(Color::Rgb(255, 160, 50))),
+        Span::raw(" Played   "),
         Span::styled("[q]", Style::default().fg(Color::Rgb(255, 160, 50))),
         Span::raw(" Quit"),
     ])];
@@ -542,6 +631,8 @@ fn draw_micro_status(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, st
         Span::styled(" ♪ ", Style::default().fg(Color::Rgb(255, 180, 80))),
         service_badge(&state.service),
         Span::raw(" "),
+        favorite_badge(state.is_favorite),
+        Span::raw(if state.is_favorite { " " } else { "" }),
         Span::styled(&state.filename, Style::default().fg(Color::White)),
         Span::raw("  "),
         Span::styled(time_str, Style::default().fg(Color::Rgb(180, 180, 200))),
@@ -582,6 +673,156 @@ fn badge_span(label: &'static str, color: Color) -> Span<'static> {
         format!("[{label}]"),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )
+}
+
+fn favorite_badge(is_favorite: bool) -> Span<'static> {
+    if is_favorite {
+        Span::styled(
+            "[*]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("")
+    }
+}
+
+fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &HistoryPanelState) {
+    let area = centered_rect(88, 72, frame.size());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Rgb(90, 90, 120)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    let title = format!(
+        "Played Songs  •  sort: {} {}",
+        panel.sort_field.label(),
+        if panel.descending { "↓" } else { "↑" }
+    );
+    let header = vec![Line::from(vec![
+        Span::styled(
+            title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  •  j/k move  h/l sort  r reverse  s star  enter replay  p/esc close",
+            Style::default().fg(Color::Rgb(150, 150, 170)),
+        ),
+    ])];
+    frame.render_widget(Paragraph::new(header), chunks[0]);
+
+    let mut rows = Vec::new();
+    if panel.rows.is_empty() {
+        rows.push(Line::from(vec![Span::styled(
+            "No songs played yet. Give the speakers something to gossip about.",
+            Style::default().fg(Color::Rgb(180, 180, 200)),
+        )]));
+    } else {
+        rows.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("Title", Style::default().fg(Color::Rgb(255, 180, 80))),
+            Span::raw("                              "),
+            Span::styled("Platform", Style::default().fg(Color::Rgb(255, 180, 80))),
+            Span::raw("     "),
+            Span::styled("Last Played", Style::default().fg(Color::Rgb(255, 180, 80))),
+            Span::raw("     "),
+            Span::styled("Plays", Style::default().fg(Color::Rgb(255, 180, 80))),
+        ]));
+
+        for (idx, row) in panel.rows.iter().enumerate() {
+            let selected = idx == panel.selected;
+            let style = if selected {
+                Style::default().bg(Color::Rgb(45, 45, 65)).fg(Color::White)
+            } else {
+                Style::default().fg(Color::Rgb(210, 210, 220))
+            };
+            let marker = if row.is_favorite { "*" } else { " " };
+            let title = truncate_text(&row.title, 28);
+            let platform = truncate_text(&row.platform, 10);
+            let last_played = format_timestamp(row.last_played_at);
+            rows.push(Line::from(vec![
+                Span::styled(format!("{marker} "), style.fg(Color::Yellow)),
+                Span::styled(format!("{title:<28}"), style),
+                Span::raw("  "),
+                Span::styled(format!("{platform:<10}"), style),
+                Span::raw("  "),
+                Span::styled(format!("{last_played:<16}"), style),
+                Span::raw("  "),
+                Span::styled(format!("{:>5}", row.play_count), style),
+            ]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(rows), chunks[1]);
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(vec![Span::styled(
+            "Tiny jukebox historian online. It remembers everything, especially your repeats.",
+            Style::default().fg(Color::Rgb(120, 120, 145)),
+        )])]),
+        chunks[2],
+    );
+}
+
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn format_timestamp(timestamp: i64) -> String {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn spinner_frame(frame_count: u64) -> char {
+    const FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
+    FRAMES[((frame_count / 6) as usize) % FRAMES.len()]
 }
 
 fn draw_loading_title(
