@@ -14,7 +14,7 @@ use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
 use tokio::runtime::Runtime;
 
-use crate::playback_input::{PlaybackInput, ProcessFormat};
+use crate::playback_input::PlaybackInput;
 use stream_download::http::reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use stream_download::http::reqwest::Client as ReqwestClient;
 
@@ -123,16 +123,10 @@ impl AudioPlayer {
 
 fn decode_input(
     reader: Box<dyn MediaReader>,
-    input: &PlaybackInput,
+    _input: &PlaybackInput,
 ) -> Result<Decoder<BufReader<Box<dyn MediaReader>>>> {
     let reader = BufReader::new(reader);
-    match input {
-        PlaybackInput::ProcessStdout {
-            format_hint: ProcessFormat::Wav,
-            ..
-        } => Decoder::new_wav(reader).wrap_err("failed to decode streamed wav audio"),
-        _ => Decoder::new(reader).wrap_err("failed to decode audio file"),
-    }
+    Decoder::new(reader).wrap_err("failed to decode audio")
 }
 
 fn open_input(
