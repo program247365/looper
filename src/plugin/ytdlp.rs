@@ -46,7 +46,6 @@ pub fn resolve_url(url: &str, cache_dir: &Path, service: &str) -> Result<Vec<Tra
                 None
             } else {
                 Some(PendingDownload {
-                    service: service.to_string(),
                     source_url: track.webpage_url.clone(),
                 })
             };

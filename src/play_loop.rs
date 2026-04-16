@@ -19,13 +19,13 @@ use std::{
 };
 
 use crate::audio::AudioPlayer;
-use crate::download::{DownloadEvent, LoadingPhase, LoadingState};
+use crate::download::{DownloadEvent, LoadingPhase};
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, ytdlp, TrackInfo};
 use crate::storage::{track_record, HistorySortField, SharedStorage, Storage};
 use crate::tui::{
-    draw, draw_loading, draw_startup, restore_terminal, setup_terminal, AppState,
-    HistoryPanelState, StartupScreenState, N_BANDS,
+    draw, draw_startup, restore_terminal, setup_terminal, AppState, HistoryPanelState,
+    StartupScreenState, N_BANDS,
 };
 
 pub fn play_file(url: &str) -> Result<()> {
@@ -322,7 +322,7 @@ fn toggle_history_panel(state: &mut AppState, storage: &SharedStorage) -> Result
     let mut panel = HistoryPanelState {
         rows: Vec::new(),
         selected: 0,
-        sort_field: HistorySortField::LastPlayed,
+        sort_field: HistorySortField::TimePlayed,
         descending: true,
     };
     refresh_history_panel(&mut panel, storage)?;
@@ -341,6 +341,32 @@ fn refresh_history_panel(panel: &mut HistoryPanelState, storage: &SharedStorage)
         panel.selected = panel.selected.min(panel.rows.len() - 1);
     }
     Ok(())
+}
+
+fn persist_played_time(
+    storage: &SharedStorage,
+    track_key: &str,
+    played_seconds: i64,
+) -> Result<()> {
+    storage
+        .lock()
+        .unwrap()
+        .record_playback_time(track_key, played_seconds)?;
+    Ok(())
+}
+
+fn played_seconds(state: &AppState) -> i64 {
+    if state.is_playlist {
+        return state.elapsed().as_secs() as i64;
+    }
+
+    match state.duration {
+        Some(duration) if duration.as_secs() > 0 => {
+            let completed_loops = state.loop_count.saturating_sub(1);
+            (completed_loops * duration.as_secs() + state.elapsed().as_secs()) as i64
+        }
+        _ => state.elapsed().as_secs() as i64,
+    }
 }
 
 /// Reads the latest samples from the audio tap, runs FFT via spectrum-analyzer,
@@ -537,7 +563,28 @@ fn play_single_track(
         return Ok(LoopAction::Quit);
     }
 
+    render_track_startup(
+        terminal,
+        title_state,
+        &track,
+        track_index,
+        total_tracks,
+        is_playlist,
+        LoadingPhase::Finalizing,
+        None,
+        "patching cables into the tiny disco".to_string(),
+        0,
+    )?;
     let player = AudioPlayer::new(track.playback.clone(), !is_playlist)?;
+    wait_for_player_ready(
+        terminal,
+        title_state,
+        &track,
+        track_index,
+        total_tracks,
+        is_playlist,
+        &player,
+    )?;
     let record = track_record(&track)?;
     {
         let storage = storage.lock().unwrap();
@@ -568,7 +615,16 @@ fn play_single_track(
         history_panel: None,
     };
 
-    run_loop(terminal, &mut state, &player, &track, storage, title_state)
+    let result = run_loop(
+        terminal,
+        &mut state,
+        &player,
+        &track,
+        storage.clone(),
+        title_state,
+    )?;
+    persist_played_time(&storage, &record.track_key, played_seconds(&state))?;
+    Ok(result)
 }
 
 struct PrefetchWorker {
@@ -689,37 +745,55 @@ fn prepare_track_for_playback(
         }
     });
 
-    let mut loading = LoadingState::new(
-        track.title.clone(),
-        pending.service,
-        track_index,
-        total_tracks,
-        is_playlist,
-    );
+    let mut frame_count = 0_u64;
+    let mut phase = LoadingPhase::Resolving;
+    let mut progress = None;
+    let mut note = "reading the tea leaves in remote metadata".to_string();
 
     loop {
-        loading.frame_count += 1;
-        title_state.set(format_loading_title(loading.frame_count, &loading.title))?;
-        terminal.draw(|frame| draw_loading(frame, &loading))?;
+        frame_count += 1;
+        render_track_startup(
+            terminal,
+            title_state,
+            track,
+            track_index,
+            total_tracks,
+            is_playlist,
+            phase.clone(),
+            progress.clone(),
+            note.clone(),
+            frame_count,
+        )?;
 
         while let Ok(event) = receiver.try_recv() {
             match event {
-                DownloadEvent::Progress(progress) => {
-                    loading.progress = progress;
-                    loading.phase = LoadingPhase::Downloading;
+                DownloadEvent::Progress(next_progress) => {
+                    progress = Some(next_progress);
+                    phase = LoadingPhase::Downloading;
+                    note = "teaching bytes to moonwalk into the cache".to_string();
                 }
                 DownloadEvent::Finalizing => {
-                    loading.phase = LoadingPhase::Finalizing;
+                    phase = LoadingPhase::Finalizing;
+                    note = "teaching ffmpeg some manners before showtime".to_string();
                 }
                 DownloadEvent::Ready(path) => {
-                    loading.phase = LoadingPhase::Ready;
                     track.playback = PlaybackInput::file(path);
                     track.pending_download = None;
                     return Ok(false);
                 }
                 DownloadEvent::Error(message) => {
-                    loading.phase = LoadingPhase::Error(message.clone());
-                    terminal.draw(|frame| draw_loading(frame, &loading))?;
+                    render_track_startup(
+                        terminal,
+                        title_state,
+                        track,
+                        track_index,
+                        total_tracks,
+                        is_playlist,
+                        LoadingPhase::Error(message.clone()),
+                        progress.clone(),
+                        message.clone(),
+                        frame_count,
+                    )?;
                     thread::sleep(Duration::from_millis(900));
                     return Err(color_eyre::eyre::eyre!(message));
                 }
@@ -736,6 +810,157 @@ fn prepare_track_for_playback(
                 }
             }
         }
+    }
+}
+
+fn wait_for_player_ready(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+    track: &TrackInfo,
+    track_index: usize,
+    total_tracks: usize,
+    is_playlist: bool,
+    player: &AudioPlayer,
+) -> Result<()> {
+    let start = Instant::now();
+    let mut frame_count = 0_u64;
+
+    loop {
+        let buffered_samples = player.sample_buf.lock().unwrap().len();
+        if buffered_samples > 0 || start.elapsed() >= Duration::from_millis(750) {
+            return Ok(());
+        }
+
+        frame_count += 1;
+        render_track_startup(
+            terminal,
+            title_state,
+            track,
+            track_index,
+            total_tracks,
+            is_playlist,
+            LoadingPhase::Ready,
+            None,
+            "priming the speakers so the first hit lands clean".to_string(),
+            frame_count,
+        )?;
+        thread::sleep(Duration::from_millis(30));
+    }
+}
+
+fn render_track_startup(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+    track: &TrackInfo,
+    track_index: usize,
+    total_tracks: usize,
+    is_playlist: bool,
+    phase: LoadingPhase,
+    progress: Option<crate::download::DownloadProgress>,
+    note: String,
+    frame_count: u64,
+) -> Result<()> {
+    title_state.set(format_loading_title(frame_count, &track.title))?;
+    let status = startup_status(
+        track,
+        track_index,
+        total_tracks,
+        is_playlist,
+        &phase,
+        progress,
+    );
+    let startup = StartupScreenState {
+        status,
+        logs: track_startup_logs(note),
+        frame_count,
+    };
+    terminal.draw(|frame| draw_startup(frame, &startup))?;
+    Ok(())
+}
+
+fn startup_status(
+    track: &TrackInfo,
+    track_index: usize,
+    total_tracks: usize,
+    is_playlist: bool,
+    phase: &LoadingPhase,
+    progress: Option<crate::download::DownloadProgress>,
+) -> String {
+    let position = if is_playlist {
+        format!("track {track_index}/{total_tracks}")
+    } else {
+        "single track".to_string()
+    };
+    let service = track.service.as_deref().unwrap_or("Local");
+    let title = truncate_title(&track.title, 48);
+
+    match phase {
+        LoadingPhase::Resolving => format!("{position} • {service} • sizing up `{title}`"),
+        LoadingPhase::Downloading => {
+            let progress_label = progress
+                .map(|p| {
+                    let percent = p
+                        .fraction()
+                        .map(|f| format!("{}%", (f * 100.0).round() as u64))
+                        .unwrap_or_else(|| "warming up".to_string());
+                    let speed = p
+                        .speed_bytes_per_sec
+                        .map(human_speed)
+                        .unwrap_or_else(|| "--".to_string());
+                    let eta = p
+                        .eta_seconds
+                        .map(human_eta)
+                        .unwrap_or_else(|| "--:--".to_string());
+                    format!("{percent} • {speed} • eta {eta}")
+                })
+                .unwrap_or_else(|| "warming up".to_string());
+            format!("{position} • {service} • downloading `{title}` • {progress_label}")
+        }
+        LoadingPhase::Finalizing => format!("{position} • {service} • polishing `{title}`"),
+        LoadingPhase::Ready => format!("{position} • {service} • cueing `{title}`"),
+        LoadingPhase::Error(message) => {
+            format!("{position} • {service} • {}", truncate_title(message, 48))
+        }
+    }
+}
+
+fn track_startup_logs(note: String) -> Vec<String> {
+    vec![
+        note,
+        "checking that the beat and the database remain legally married".to_string(),
+        "keeping the stage curtains closed until audio is actually ready".to_string(),
+    ]
+}
+
+fn human_speed(bytes_per_sec: u64) -> String {
+    format!("{}/s", human_bytes(bytes_per_sec))
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn human_eta(eta: u64) -> String {
+    let minutes = eta / 60;
+    let seconds = eta % 60;
+    if minutes >= 60 {
+        let hours = minutes / 60;
+        let minutes = minutes % 60;
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -835,11 +1060,12 @@ mod tests {
                 platform: "Local".into(),
                 is_favorite: false,
                 play_count: 1,
+                total_play_seconds: 10,
                 first_played_at: 0,
                 last_played_at: 0,
             }],
             selected: 0,
-            sort_field: HistorySortField::LastPlayed,
+            sort_field: HistorySortField::TimePlayed,
             descending: true,
         });
 

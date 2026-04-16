@@ -22,7 +22,6 @@ pub enum ProcessFormat {
 
 #[derive(Clone, Debug)]
 pub struct PendingDownload {
-    pub service: String,
     pub source_url: String,
 }
 

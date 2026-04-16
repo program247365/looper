@@ -17,9 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::download::{
-    format_bytes, format_eta, format_speed, CacheStatus, LoadingPhase, LoadingState,
-};
+use crate::download::CacheStatus;
 use crate::storage::{HistoryRow, HistorySortField};
 
 pub const N_BANDS: usize = 32;
@@ -98,27 +96,6 @@ pub fn draw(frame: &mut ratatui::Frame, state: &AppState) {
     }
 }
 
-pub fn draw_loading(frame: &mut ratatui::Frame, state: &LoadingState) {
-    let area = frame.size();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(7),
-            Constraint::Length(5),
-            Constraint::Length(4),
-            Constraint::Min(0),
-            Constraint::Length(2),
-        ])
-        .split(area);
-
-    draw_loading_title(frame, chunks[1], state);
-    draw_loading_bar(frame, chunks[2], state);
-    draw_loading_meta(frame, chunks[3], state);
-    draw_loading_ambient(frame, chunks[4], state);
-    draw_loading_footer(frame, chunks[5]);
-}
-
 pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
     let area = frame.size();
     let chunks = Layout::default()
@@ -133,12 +110,12 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
         .split(area);
 
     let title = vec![
-        Line::from("  _                              "),
-        Line::from(" | |    ___   ___  _ __   ___ _ __ "),
-        Line::from(" | |   / _ \\ / _ \\| '_ \\ / _ \\ '__|"),
-        Line::from(" | |__| (_) | (_) | |_) |  __/ |   "),
-        Line::from(" |_____\\___/ \\___/| .__/ \\___|_|   "),
-        Line::from("                  |_|              "),
+        Line::from("  _                                   .-''''-.    .-''''-. "),
+        Line::from(" | |    ___   ___  _ __   ___ _ __  .'  .-.  '. .'  .-.  '."),
+        Line::from(" | |   / _ \\ / _ \\| '_ \\ / _ \\ '__|/   /   \\   V   /   \\   \\"),
+        Line::from(" | |__| (_) | (_) | |_) |  __/ |   \\   \\   /       \\   /   /"),
+        Line::from(" |_____\\___/ \\___/| .__/ \\___|_|    '.  '-'  .' '.  '-'  .' "),
+        Line::from("                  |_|                 '-.__.-'   '-.__.-'   "),
     ];
 
     frame.render_widget(
@@ -736,11 +713,13 @@ fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &His
         rows.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled("Title", Style::default().fg(Color::Rgb(255, 180, 80))),
-            Span::raw("                              "),
+            Span::raw("                        "),
             Span::styled("Platform", Style::default().fg(Color::Rgb(255, 180, 80))),
-            Span::raw("     "),
+            Span::raw("   "),
             Span::styled("Last Played", Style::default().fg(Color::Rgb(255, 180, 80))),
-            Span::raw("     "),
+            Span::raw("   "),
+            Span::styled("Time", Style::default().fg(Color::Rgb(255, 180, 80))),
+            Span::raw("   "),
             Span::styled("Plays", Style::default().fg(Color::Rgb(255, 180, 80))),
         ]));
 
@@ -752,16 +731,19 @@ fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &His
                 Style::default().fg(Color::Rgb(210, 210, 220))
             };
             let marker = if row.is_favorite { "*" } else { " " };
-            let title = truncate_text(&row.title, 28);
-            let platform = truncate_text(&row.platform, 10);
+            let title = truncate_text(&row.title, 24);
+            let platform = truncate_text(&row.platform, 8);
             let last_played = format_timestamp(row.last_played_at);
+            let total_time = format_total_play_time(row.total_play_seconds);
             rows.push(Line::from(vec![
                 Span::styled(format!("{marker} "), style.fg(Color::Yellow)),
-                Span::styled(format!("{title:<28}"), style),
+                Span::styled(format!("{title:<24}"), style),
                 Span::raw("  "),
-                Span::styled(format!("{platform:<10}"), style),
+                Span::styled(format!("{platform:<8}"), style),
                 Span::raw("  "),
                 Span::styled(format!("{last_played:<16}"), style),
+                Span::raw("  "),
+                Span::styled(format!("{total_time:>7}"), style),
                 Span::raw("  "),
                 Span::styled(format!("{:>5}", row.play_count), style),
             ]));
@@ -820,182 +802,20 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     }
 }
 
+fn format_total_play_time(total_seconds: i64) -> String {
+    let total_seconds = total_seconds.max(0) as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 fn spinner_frame(frame_count: u64) -> char {
     const FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
     FRAMES[((frame_count / 6) as usize) % FRAMES.len()]
-}
-
-fn draw_loading_title(
-    frame: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    state: &LoadingState,
-) {
-    let subtitle = if state.is_playlist {
-        format!(
-            "Track {}/{}  •  {}",
-            state.track_index, state.total_tracks, state.service
-        )
-    } else {
-        format!("Single Track  •  {}", state.service)
-    };
-
-    let status = match &state.phase {
-        LoadingPhase::Resolving => "Preparing audio",
-        LoadingPhase::Downloading => "Downloading",
-        LoadingPhase::Finalizing => "Finalizing",
-        LoadingPhase::Ready => "Ready",
-        LoadingPhase::Error(_) => "Download failed",
-    };
-
-    let lines = vec![
-        Line::from(vec![Span::styled(
-            state.title.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled(subtitle, Style::default().fg(Color::Rgb(255, 180, 80))),
-            Span::raw("  "),
-            Span::styled(status, Style::default().fg(Color::Rgb(180, 180, 200))),
-        ]),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Rgb(60, 60, 80)));
-    frame.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-fn draw_loading_bar(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &LoadingState) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Rgb(60, 60, 80)));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width < 4 {
-        return;
-    }
-
-    let ratio = state.progress.fraction().unwrap_or_else(|| {
-        let shimmer = (state.frame_count % 20) as f64 / 19.0;
-        shimmer.clamp(0.05, 0.95)
-    });
-    let width = inner.width.saturating_sub(2) as usize;
-    let filled = (ratio * width as f64).round() as usize;
-    let bar: String = (0..width)
-        .map(|idx| {
-            if idx + 1 == filled.max(1) {
-                PROGRESS_KNOB
-            } else if idx < filled {
-                '━'
-            } else {
-                '─'
-            }
-        })
-        .collect();
-    let label = if let Some(fraction) = state.progress.fraction() {
-        format!("{:>3}%", (fraction * 100.0).round() as u64)
-    } else {
-        "LIVE".to_string()
-    };
-
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(bar, Style::default().fg(Color::Rgb(255, 160, 50))),
-            Span::raw(" "),
-            Span::styled(label, Style::default().fg(Color::Rgb(220, 220, 240))),
-        ])),
-        inner,
-    );
-}
-
-fn draw_loading_meta(
-    frame: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    state: &LoadingState,
-) {
-    let downloaded = state
-        .progress
-        .downloaded_bytes
-        .map(format_bytes)
-        .unwrap_or_else(|| "--".to_string());
-    let total = state
-        .progress
-        .total_bytes
-        .map(format_bytes)
-        .unwrap_or_else(|| "--".to_string());
-    let speed = format_speed(state.progress.speed_bytes_per_sec);
-    let eta = format_eta(state.progress.eta_seconds);
-    let detail = match &state.phase {
-        LoadingPhase::Resolving => "Inspecting remote media metadata".to_string(),
-        LoadingPhase::Downloading => "Building local cache for stable playback".to_string(),
-        LoadingPhase::Finalizing => "Converting audio and preparing handoff".to_string(),
-        LoadingPhase::Ready => "Starting playback".to_string(),
-        LoadingPhase::Error(message) => message.clone(),
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Transferred ", Style::default().fg(Color::DarkGray)),
-            Span::styled(downloaded, Style::default().fg(Color::White)),
-            Span::styled(" / ", Style::default().fg(Color::DarkGray)),
-            Span::styled(total, Style::default().fg(Color::White)),
-            Span::styled("    Speed ", Style::default().fg(Color::DarkGray)),
-            Span::styled(speed, Style::default().fg(Color::White)),
-            Span::styled("    ETA ", Style::default().fg(Color::DarkGray)),
-            Span::styled(eta, Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![Span::styled(
-            detail,
-            Style::default().fg(Color::Rgb(160, 160, 190)),
-        )]),
-    ];
-
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn draw_loading_ambient(
-    frame: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    state: &LoadingState,
-) {
-    let height = area.height as usize;
-    let width = area.width as usize;
-    if height == 0 || width == 0 {
-        return;
-    }
-
-    let lines: Vec<Line> = (0..height)
-        .map(|row| {
-            let spans: Vec<Span> = (0..width)
-                .map(|col| {
-                    let noise = cell_noise(row, col, (state.frame_count / 3) as usize);
-                    let threshold = 0.92 - (row as f32 / height.max(1) as f32) * 0.25;
-                    if noise > threshold {
-                        let color = scatter_color((col % N_BANDS).min(N_BANDS - 1), N_BANDS);
-                        Span::styled("·", Style::default().fg(color))
-                    } else {
-                        Span::raw(" ")
-                    }
-                })
-                .collect();
-            Line::from(spans)
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn draw_loading_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("[q]", Style::default().fg(Color::Rgb(255, 160, 50))),
-            Span::raw(" Cancel   "),
-            Span::styled("[Ctrl-C]", Style::default().fg(Color::Rgb(255, 160, 50))),
-            Span::raw(" Quit"),
-        ]))
-        .alignment(Alignment::Center),
-        area,
-    );
 }

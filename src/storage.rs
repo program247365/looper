@@ -23,6 +23,7 @@ pub type SharedStorage = Arc<Mutex<Storage>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HistorySortField {
+    TimePlayed,
     LastPlayed,
     Platform,
     Title,
@@ -32,6 +33,7 @@ pub enum HistorySortField {
 impl HistorySortField {
     pub fn label(self) -> &'static str {
         match self {
+            Self::TimePlayed => "Time Played",
             Self::LastPlayed => "Last Played",
             Self::Platform => "Platform",
             Self::Title => "Title",
@@ -41,16 +43,18 @@ impl HistorySortField {
 
     pub fn next(self) -> Self {
         match self {
+            Self::TimePlayed => Self::LastPlayed,
             Self::LastPlayed => Self::Platform,
             Self::Platform => Self::Title,
             Self::Title => Self::PlayCount,
-            Self::PlayCount => Self::LastPlayed,
+            Self::PlayCount => Self::TimePlayed,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            Self::LastPlayed => Self::PlayCount,
+            Self::TimePlayed => Self::PlayCount,
+            Self::LastPlayed => Self::TimePlayed,
             Self::Platform => Self::LastPlayed,
             Self::Title => Self::Platform,
             Self::PlayCount => Self::Title,
@@ -66,6 +70,7 @@ pub struct HistoryRow {
     pub platform: String,
     pub is_favorite: bool,
     pub play_count: i64,
+    pub total_play_seconds: i64,
     pub first_played_at: i64,
     pub last_played_at: i64,
 }
@@ -87,6 +92,7 @@ struct NewPlayedTrack<'a> {
     platform: &'a str,
     is_favorite: bool,
     play_count: i64,
+    total_play_seconds: i64,
     first_played_at: i64,
     last_played_at: i64,
 }
@@ -100,6 +106,7 @@ struct PlayedTrackRow {
     platform: String,
     is_favorite: bool,
     play_count: i64,
+    total_play_seconds: i64,
     first_played_at: i64,
     last_played_at: i64,
 }
@@ -113,6 +120,7 @@ impl From<PlayedTrackRow> for HistoryRow {
             platform: row.platform,
             is_favorite: row.is_favorite,
             play_count: row.play_count,
+            total_play_seconds: row.total_play_seconds,
             first_played_at: row.first_played_at,
             last_played_at: row.last_played_at,
         }
@@ -174,6 +182,7 @@ impl Storage {
                     platform: &record.platform,
                     is_favorite: false,
                     play_count: 1,
+                    total_play_seconds: 0,
                     first_played_at: now,
                     last_played_at: now,
                 };
@@ -182,6 +191,29 @@ impl Storage {
                     .execute(conn)?;
             }
 
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    pub fn record_playback_time(&self, track_key: &str, played_seconds: i64) -> Result<()> {
+        use crate::schema::played_tracks::dsl as tracks;
+
+        if played_seconds <= 0 {
+            return Ok(());
+        }
+
+        let mut connection = establish_connection(&self.db_path)?;
+        connection.transaction::<_, diesel::result::Error, _>(|conn| {
+            let existing_seconds = tracks::played_tracks
+                .filter(tracks::track_key.eq(track_key))
+                .select(tracks::total_play_seconds)
+                .first::<i64>(conn)?;
+
+            diesel::update(tracks::played_tracks.filter(tracks::track_key.eq(track_key)))
+                .set(tracks::total_play_seconds.eq(existing_seconds + played_seconds))
+                .execute(conn)?;
             Ok(())
         })?;
 
@@ -253,6 +285,11 @@ fn compare_history_rows(
         HistorySortField::LastPlayed => left
             .last_played_at
             .cmp(&right.last_played_at)
+            .then_with(|| left.title.cmp(&right.title)),
+        HistorySortField::TimePlayed => left
+            .total_play_seconds
+            .cmp(&right.total_play_seconds)
+            .then_with(|| left.play_count.cmp(&right.play_count))
             .then_with(|| left.title.cmp(&right.title)),
         HistorySortField::Platform => left
             .platform
@@ -366,6 +403,7 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].play_count, 1);
+        assert_eq!(rows[0].total_play_seconds, 0);
         assert_eq!(rows[0].title, "A");
     }
 
@@ -405,6 +443,26 @@ mod tests {
     }
 
     #[test]
+    fn accumulates_playback_time() {
+        let (_dir, storage) = test_storage();
+        let record = TrackRecord {
+            track_key: "https://example.com/a".into(),
+            replay_target: "https://example.com/a".into(),
+            title: "A".into(),
+            platform: "YouTube".into(),
+        };
+
+        storage.record_play(&record).unwrap();
+        storage.record_playback_time(&record.track_key, 42).unwrap();
+        storage.record_playback_time(&record.track_key, 8).unwrap();
+
+        let rows = storage
+            .list_history(HistorySortField::TimePlayed, true)
+            .unwrap();
+        assert_eq!(rows[0].total_play_seconds, 50);
+    }
+
+    #[test]
     fn sorts_rows() {
         let (_dir, storage) = test_storage();
         storage
@@ -415,6 +473,7 @@ mod tests {
                 platform: "YouTube".into(),
             })
             .unwrap();
+        storage.record_playback_time("b", 15).unwrap();
         storage
             .record_play(&TrackRecord {
                 track_key: "a".into(),
@@ -423,9 +482,10 @@ mod tests {
                 platform: "SoundCloud".into(),
             })
             .unwrap();
+        storage.record_playback_time("a", 60).unwrap();
 
         let rows = storage
-            .list_history(HistorySortField::Title, false)
+            .list_history(HistorySortField::TimePlayed, true)
             .unwrap();
         assert_eq!(rows[0].title, "Alpha");
         assert_eq!(rows[1].title, "Beta");
