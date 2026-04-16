@@ -1,5 +1,30 @@
 # WORKLOG
 
+## 2026-04-16: Online playback, loading UI, service badges
+
+### What changed
+- Added remote URL support through `src/plugin/` with service matchers for YouTube, SoundCloud, and HypeM plus a generic `yt-dlp` fallback
+- Added OS cache directory support via `directories::ProjectDirs`
+- Local files still play directly, but remote tracks now resolve into `TrackInfo` values that can point at cached files, HTTP streams, or process-backed streams
+- Added playlist orchestration in `play_loop.rs`: single tracks loop forever; playlists play each track once and then loop the entire list
+- Added bounded background prefetch for playlist tracks
+- Added a full-screen loading scene for uncached remote startup with progress, bytes, speed, and ETA
+- Added compact cache status support in the playback header
+- Added small source badges in the TUI: `YT`, `SC`, `HM`
+- Added clearer `yt-dlp` error reporting, especially around YouTube `403` failures and invalid HypeM URLs
+
+### What we decided
+- Keep YouTube on a download-first cached path for now because direct/process streaming was less reliable than cached playback with current `yt-dlp` behavior
+- Keep SoundCloud and HypeM on the newer hybrid path: prefer stream-first where workable, fall back to download-first
+- Put remote startup progress inside the TUI instead of relying on stderr logging
+- Use text badges instead of terminal image/SVG rendering for source icons; simpler and much more reliable
+
+### What to revisit
+- Cookie/authenticated `yt-dlp` support for YouTube when anonymous access fails
+- More robust in-player cache progress after the loading screen handoff
+- Optional fallback from text badges to Nerd Font glyphs if portability concerns are acceptable
+- More live-service smoke coverage across public playlist URLs
+
 ## 2026-04-06: Add ratatui TUI with rodio audio backend
 
 ### What changed

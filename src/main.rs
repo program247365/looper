@@ -2,7 +2,10 @@ use color_eyre::eyre::Result;
 use structopt::StructOpt;
 
 mod audio;
+mod download;
 mod play_loop;
+mod playback_input;
+mod plugin;
 mod tui;
 use play_loop::play_file;
 

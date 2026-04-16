@@ -1,10 +1,29 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
 
 ## What This Is
 
-`looper` is a Rust CLI that plays a single audio file on an infinite loop with a ratatui TUI. The entire useful surface is one command: `looper play --url <path>`.
+`looper` is a Rust CLI audio looper with a `ratatui` TUI.
+
+The main user command is still:
+
+```bash
+looper play --url <path-or-url>
+```
+
+But `--url` now accepts:
+
+- local audio file paths
+- YouTube tracks and playlists
+- SoundCloud tracks and playlists
+- HypeM URLs
+
+Behavior:
+
+- local files: play directly
+- single tracks: loop forever
+- playlists: play each track once, then loop the whole playlist
 
 ## Commands
 
@@ -19,13 +38,24 @@ make install        # install release binary to /usr/local/bin
 
 # Homebrew release workflow
 make release        # tag current version, push, create GH release, update tap formula
-make release-patch  # bump patch (0.1.0 → 0.1.1), then release
-make release-minor  # bump minor (0.1.x → 0.2.0), then release
-make bump-formula   # update tap formula SHA256/version only (after manual tag)
+make release-patch  # bump patch, then release
+make release-minor  # bump minor, then release
+make bump-formula   # update tap formula SHA256/version only
 
-# Run a specific test
-cargo test test_help
+# Direct cargo commands
+cargo build
+cargo build --release
+cargo test
 ```
+
+## External Runtime Dependencies
+
+Remote playback requires:
+
+- `yt-dlp`
+- `ffmpeg`
+
+If YouTube playback fails with `403`, updating `yt-dlp` is the first thing to try.
 
 ## Install via Homebrew
 
@@ -38,31 +68,116 @@ Tap repo: https://github.com/program247365/homebrew-tap
 
 ## Key Dependencies
 
-- **rodio** — audio playback (owns the audio output thread)
-- **symphonia** — duration probing for VBR MP3s (Xing/VBRI headers) when rodio's decoder returns `None`
-- **spectrum-analyzer** — FFT + frequency spectrum from raw samples
-- **ratatui** + **crossterm** — TUI rendering and terminal event handling
-- **structopt** — CLI argument parsing
+- `rodio` — audio playback and sink control
+- `symphonia` — duration probing, especially for VBR MP3s
+- `spectrum-analyzer` — FFT and log-spaced band analysis
+- `ratatui` + `crossterm` — terminal UI and input handling
+- `directories` — cache directory lookup
+- `serde_json` — parsing `yt-dlp` metadata output
+- `stream-download` — HTTP/process-backed stream readers
+- `tokio` — runtime used by streamed/process-backed audio inputs
+- `structopt` — CLI parsing
 
 ## Architecture
 
-Four source files:
+### Main modules
 
-- `src/main.rs` — CLI entry point using `structopt`. Declares all modules, routes `Command::Play` to `play_loop::play_file()`.
-- `src/audio.rs` — `AudioPlayer` wrapping rodio. Owns `OutputStream` + `Sink`, probes duration (rodio fallback → symphonia Xing/VBRI header), exposes shared `sample_buf` ring buffer for FFT. `SampleTap<S>` intercepts samples on the audio thread via `try_lock`.
-- `src/tui.rs` — `AppState`, terminal setup/restore, `draw()`. Scatter visualizer uses per-cell deterministic hash for stable dot placement; `f` toggles fullscreen. Progress bar renders `━━●─── 0:42/3:12` inline.
-- `src/play_loop.rs` — Orchestrator. 30ms-tick crossterm event loop (Space = pause, `f` = fullscreen, q = quit). Calls `update_visualizer()` each tick: reads ring buffer, down-mixes stereo, Hann window, FFT via `spectrum-analyzer`, maps to 32 log-spaced bands with asymmetric smoothing.
+- `src/main.rs` — CLI entry point, installs `color-eyre`, routes `play` to `play_loop::play_file`
+- `src/play_loop.rs` — high-level orchestration for local files, remote resolution, loading UI handoff, playlists, prefetching, and the main input/render loop
+- `src/audio.rs` — `AudioPlayer`, rodio sink/output setup, decoder selection, file/HTTP/process-backed input opening, shared sample tap buffer
+- `src/tui.rs` — playback TUI and loading TUI rendering
+- `src/download.rs` — loading/progress state models and helpers for formatting bytes/speed/ETA
+- `src/plugin/` — remote service resolution and `yt-dlp` integration
+- `src/playback_input.rs` — playback input abstraction (`File`, `HttpStream`, `ProcessStdout`) plus pending-download metadata
+
+### Remote playback model
+
+The project now uses a hybrid remote architecture.
+
+- `src/plugin/mod.rs`
+  - plugin registry
+  - cache directory lookup via `ProjectDirs`
+  - dispatch to YouTube, SoundCloud, HypeM, or generic `yt-dlp`
+- `src/plugin/ytdlp.rs`
+  - checks `yt-dlp` availability
+  - extracts metadata and playlist entries
+  - downloads/caches tracks
+  - emits machine-readable progress for the loading TUI
+  - contains current service-specific failure explanations
+- `src/plugin/youtube.rs`
+  - normalizes some watch URLs with both `v=` and `list=`
+  - currently uses the more reliable download-first path
+- `src/plugin/soundcloud.rs`
+  - prefers stream-first resolution and falls back to download-first
+- `src/plugin/hypem.rs`
+  - prefers stream-first resolution and falls back to download-first
+
+### Playback inputs
+
+`PlaybackInput` currently supports:
+
+- `File(PathBuf)` — local files and cached remote tracks
+- `HttpStream { .. }` — direct HTTP-backed stream reader
+- `ProcessStdout { .. }` — process-backed stream through `stream-download`
+
+Note that YouTube is intentionally on the cached-file path right now because direct/process streaming proved less reliable than download-first with current `yt-dlp` behavior.
+
+### TUI states
+
+There are now two major UI modes:
+
+- loading scene for uncached remote startup
+  - title
+  - service label
+  - progress bar
+  - downloaded bytes / total bytes
+  - speed / ETA
+  - ambient animation
+- playback scene
+  - header with service badge (`YT`, `SC`, `HM`)
+  - scatter visualizer
+  - progress bar
+  - footer / micro-status
+  - optional compact cache badge like `CACHE 42%`
+
+### Playlist behavior
+
+- single local or remote track: `repeat_infinite()`
+- playlist: play each track once, then loop the playlist
+- `PrefetchWorker` in `play_loop.rs` uses a bounded channel and background thread to cache current/next tracks where applicable
+- remote playlists are re-resolved each full loop so expiring service URLs are less likely to be reused forever
 
 ### Threading model
 
-Audio runs on rodio's internal thread; main thread owns the event loop and `AppState`. The only shared state is `sample_buf: Arc<Mutex<VecDeque<f32>>>` — a ring buffer of raw f32 samples. `SampleTap` writes to it from the audio thread using `try_lock` (never blocks playback). The main thread reads it each tick to compute FFT bands.
+- rodio owns the audio output thread
+- the main thread owns the TUI event loop and app state
+- the visualizer reads from `sample_buf: Arc<Mutex<VecDeque<f32>>>`
+- prefetch uses a background worker thread
+- some stream-backed audio inputs create a Tokio runtime inside `AudioPlayer`
 
-### Notable design decisions
+## Notable Design Decisions
 
-- **`reattach_stdin_to_tty()`** (Unix only): reopens `/dev/tty` when stdin is piped, so crossterm key events work even when launched from scripts or pipes.
-- **Loop counting via wall clock**: `repeat_infinite()` doesn't reset `Sink::get_pos()`, so elapsed time is tracked manually with `Instant` and reset when it exceeds the probed duration.
-- **Per-band AGC**: each of the 32 frequency bands tracks its own peak with slow decay (0.998), normalizing against it so quiet bands still produce visible movement.
+- `reattach_stdin_to_tty()` (Unix only) reopens `/dev/tty` when stdin is piped so crossterm still works
+- loop counting for repeated single tracks uses wall-clock elapsed time because `repeat_infinite()` does not reset sink position
+- per-band AGC keeps the scatter visualizer lively across different mixes
+- YouTube currently favors reliability over immediacy: cached download-first instead of direct stream-first
+- remote loading is presented in-TUI instead of as plain stderr logging
 
 ## Tests
 
-Integration tests live in `tests/integration.rs` using `assert_cmd`. The `test_play` test is `#[ignore]` because it requires actual audio output and a terminal. The fixture audio file is at `tests/fixtures/sound.mp3`.
+- integration tests live in `tests/integration.rs`
+- `test_play` remains ignored because it needs real audio output and a terminal
+- `src/plugin/ytdlp.rs` has parser tests for `yt-dlp` progress lines
+
+When changing remote playback:
+
+- run `cargo build`
+- run `cargo test`
+- prefer a real manual smoke test with a public URL for the affected service
+
+## Things Likely To Need Care
+
+- `yt-dlp` output formats and YouTube behavior can change over time
+- service-specific restrictions can break public URLs without any Rust-side regression
+- terminal restore correctness matters whenever touching loading/playback state transitions
+- the worktree may contain user changes; do not revert unrelated modifications

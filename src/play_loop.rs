@@ -1,76 +1,106 @@
-#[cfg(unix)]
-use libc;
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{LeaveAlternateScreen, disable_raw_mode},
+    terminal::{disable_raw_mode, LeaveAlternateScreen},
 };
+#[cfg(unix)]
+use libc;
 use std::{
-    io::stdout,
+    collections::HashSet,
+    io::{stdout, Write},
     path::Path,
+    sync::{
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+        Arc, Mutex,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
 use crate::audio::AudioPlayer;
-use crate::tui::{AppState, N_BANDS, draw, restore_terminal, setup_terminal};
+use crate::download::{DownloadEvent, LoadingPhase, LoadingState};
+use crate::playback_input::PlaybackInput;
+use crate::plugin::{self, ytdlp, TrackInfo};
+use crate::tui::{draw, draw_loading, restore_terminal, setup_terminal, AppState, N_BANDS};
 
 pub fn play_file(url: &str) -> Result<()> {
     #[cfg(unix)]
     reattach_stdin_to_tty()?;
 
-    let filename = extract_filename(url);
-    let player = AudioPlayer::new(url)?;
+    match plugin::resolve_url(url)? {
+        None => play_tracks(
+            None,
+            vec![TrackInfo {
+                title: extract_filename(url),
+                duration_secs: None,
+                playback: PlaybackInput::file(url),
+                source_url: None,
+                pending_download: None,
+                service: None,
+            }],
+            false,
+        ),
+        Some(tracks) => {
+            let is_playlist = tracks.len() > 1;
+            play_tracks(Some(url), tracks, is_playlist)
+        }
+    }
+}
 
-    let mut state = AppState {
-        filename,
-        duration: player.duration,
-        paused: false,
-        loop_count: 1,
-        loop_start: Instant::now(),
-        pause_elapsed: Duration::default(),
-        bands: vec![0.0; N_BANDS],
-        prev_bands: vec![0.0; N_BANDS],
-        band_peak: vec![0.02; N_BANDS],
-        fullscreen: false,
-        frame_count: 0,
-    };
+enum LoopAction {
+    Quit,
+    NextTrack,
+}
 
-    let mut terminal = setup_terminal()?;
+struct TitleState {
+    last_title: Option<String>,
+}
 
-    // Wrap color_eyre's panic hook so the terminal is restored before the
-    // panic message is printed.
-    let orig_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
-        orig_hook(info);
-    }));
+impl TitleState {
+    fn new() -> Self {
+        Self { last_title: None }
+    }
 
-    let result = run_loop(&mut terminal, &mut state, &player);
+    fn set(&mut self, title: String) -> Result<()> {
+        if self.last_title.as_deref() == Some(title.as_str()) {
+            return Ok(());
+        }
 
-    restore_terminal(&mut terminal)?;
-    result
+        write_terminal_title(&title)?;
+        self.last_title = Some(title);
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.set("looper".to_string())
+    }
 }
 
 fn run_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     state: &mut AppState,
     player: &AudioPlayer,
-) -> Result<()> {
+    title_state: &mut TitleState,
+) -> Result<LoopAction> {
     loop {
         if !state.paused {
             update_visualizer(state, player);
         }
 
         state.frame_count += 1;
+        title_state.set(format_playback_title(
+            state.frame_count,
+            &state.filename,
+            state.paused,
+        ))?;
         terminal.draw(|f| draw(f, state))?;
 
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        break;
+                        return Ok(LoopAction::Quit);
                     }
                     (KeyCode::Char(' '), _) => {
                         if state.paused {
@@ -90,11 +120,12 @@ fn run_loop(
             }
         }
 
-        // Advance loop counter when elapsed time exceeds song duration.
-        // We track time ourselves rather than Sink::get_pos() because
-        // repeat_infinite() doesn't reset the sink position between loops.
         if !state.paused {
-            if let Some(dur) = state.duration {
+            if state.is_playlist {
+                if player.sink.empty() {
+                    return Ok(LoopAction::NextTrack);
+                }
+            } else if let Some(dur) = state.duration {
                 if state.elapsed() >= dur {
                     state.loop_count += 1;
                     state.loop_start = Instant::now();
@@ -102,8 +133,6 @@ fn run_loop(
             }
         }
     }
-
-    Ok(())
 }
 
 /// Reads the latest samples from the audio tap, runs FFT via spectrum-analyzer,
@@ -111,7 +140,7 @@ fn run_loop(
 /// asymmetric smoothing (fast attack, slow decay) for visual stability.
 fn update_visualizer(state: &mut AppState, player: &AudioPlayer) {
     use spectrum_analyzer::windows::hann_window;
-    use spectrum_analyzer::{FrequencyLimit, samples_fft_to_spectrum};
+    use spectrum_analyzer::{samples_fft_to_spectrum, FrequencyLimit};
 
     const FFT_LEN: usize = 2048;
 
@@ -129,9 +158,7 @@ fn update_visualizer(state: &mut AppState, player: &AudioPlayer) {
 
     // Down-mix interleaved stereo → mono by averaging channel pairs
     let mono: Vec<f32> = if player.channels == 2 {
-        raw.chunks_exact(2)
-            .map(|c| (c[0] + c[1]) * 0.5)
-            .collect()
+        raw.chunks_exact(2).map(|c| (c[0] + c[1]) * 0.5).collect()
     } else {
         raw
     };
@@ -206,4 +233,322 @@ fn extract_filename(url: &str) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or(url)
         .to_string()
+}
+
+fn play_tracks(source_url: Option<&str>, tracks: Vec<TrackInfo>, is_playlist: bool) -> Result<()> {
+    let mut terminal = setup_terminal()?;
+    let mut title_state = TitleState::new();
+
+    // Wrap color_eyre's panic hook so the terminal is restored before the
+    // panic message is printed.
+    let orig_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+        orig_hook(info);
+    }));
+
+    let result = if is_playlist {
+        loop_playlist(&mut terminal, source_url, tracks, &mut title_state)
+    } else {
+        play_single_track(
+            &mut terminal,
+            tracks[0].clone(),
+            1,
+            1,
+            false,
+            &mut title_state,
+        )
+        .map(|_| ())
+    };
+
+    let _ = title_state.reset();
+    restore_terminal(&mut terminal)?;
+    result
+}
+
+fn loop_playlist(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    source_url: Option<&str>,
+    initial_tracks: Vec<TrackInfo>,
+    title_state: &mut TitleState,
+) -> Result<()> {
+    let mut tracks = initial_tracks;
+    loop {
+        let shared_tracks = Arc::new(Mutex::new(tracks));
+        let prefetch_worker = PrefetchWorker::spawn(Arc::clone(&shared_tracks));
+        let mut prefetched = HashSet::new();
+        let total_tracks = shared_tracks.lock().unwrap().len();
+
+        for idx in 0..total_tracks {
+            prefetch_worker.enqueue(idx, &mut prefetched);
+            prefetch_worker.enqueue(idx + 1, &mut prefetched);
+
+            let track = {
+                let tracks = shared_tracks.lock().unwrap();
+                tracks[idx].clone()
+            };
+
+            match play_single_track(terminal, track, idx + 1, total_tracks, true, title_state)? {
+                LoopAction::Quit => return Ok(()),
+                LoopAction::NextTrack => continue,
+            }
+        }
+
+        if let Some(url) = source_url {
+            tracks =
+                plugin::resolve_url(url)?.unwrap_or_else(|| shared_tracks.lock().unwrap().clone());
+        } else {
+            tracks = shared_tracks.lock().unwrap().clone();
+        }
+    }
+}
+
+fn play_single_track(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    mut track: TrackInfo,
+    track_index: usize,
+    total_tracks: usize,
+    is_playlist: bool,
+    title_state: &mut TitleState,
+) -> Result<LoopAction> {
+    if prepare_track_for_playback(
+        terminal,
+        &mut track,
+        track_index,
+        total_tracks,
+        is_playlist,
+        title_state,
+    )? {
+        return Ok(LoopAction::Quit);
+    }
+
+    let player = AudioPlayer::new(track.playback.clone(), !is_playlist)?;
+
+    let mut state = AppState {
+        filename: track.title.clone(),
+        service: track.service.clone(),
+        duration: player
+            .duration
+            .or_else(|| track.duration_secs.map(Duration::from_secs_f64)),
+        paused: false,
+        loop_count: 1,
+        track_index,
+        total_tracks,
+        is_playlist,
+        loop_start: Instant::now(),
+        pause_elapsed: Duration::default(),
+        bands: vec![0.0; N_BANDS],
+        prev_bands: vec![0.0; N_BANDS],
+        band_peak: vec![0.02; N_BANDS],
+        fullscreen: false,
+        frame_count: 0,
+        cache_status: None,
+    };
+
+    run_loop(terminal, &mut state, &player, title_state)
+}
+
+struct PrefetchWorker {
+    tracks: Arc<Mutex<Vec<TrackInfo>>>,
+    sender: SyncSender<PrefetchTask>,
+}
+
+#[derive(Clone)]
+struct PrefetchTask {
+    idx: usize,
+    title: String,
+    source_url: String,
+}
+
+impl PrefetchWorker {
+    fn spawn(tracks: Arc<Mutex<Vec<TrackInfo>>>) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        thread::spawn({
+            let tracks = Arc::clone(&tracks);
+            move || prefetch_worker_loop(tracks, receiver)
+        });
+        Self { tracks, sender }
+    }
+
+    fn enqueue(&self, idx: usize, prefetched: &mut HashSet<usize>) {
+        if prefetched.contains(&idx) {
+            return;
+        }
+
+        let task = {
+            let tracks = self.tracks.lock().unwrap();
+            if idx >= tracks.len() {
+                return;
+            }
+            let track = tracks[idx].clone();
+            if track.pending_download.is_none() && matches!(track.playback, PlaybackInput::File(_))
+            {
+                return;
+            }
+            let Some(source_url) = track
+                .pending_download
+                .as_ref()
+                .map(|pending| pending.source_url.clone())
+                .or(track.source_url.clone())
+            else {
+                return;
+            };
+            PrefetchTask {
+                idx,
+                title: track.title,
+                source_url,
+            }
+        };
+
+        match self.sender.try_send(task) {
+            Ok(()) => {
+                prefetched.insert(idx);
+            }
+            Err(TrySendError::Full(task)) => {
+                eprintln!("Prefetch queue is full; skipping '{}' for now.", task.title);
+            }
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+}
+
+fn prefetch_worker_loop(tracks: Arc<Mutex<Vec<TrackInfo>>>, receiver: Receiver<PrefetchTask>) {
+    let Ok(cache_dir) = plugin::cache_dir_path() else {
+        eprintln!("Prefetch disabled: failed to resolve looper cache directory.");
+        return;
+    };
+
+    while let Ok(task) = receiver.recv() {
+        eprintln!("Prefetching: {}...", task.title);
+        match ytdlp::download_track(&task.source_url, &cache_dir) {
+            Ok(local_path) => {
+                if let Ok(mut tracks) = tracks.lock() {
+                    if let Some(track) = tracks.get_mut(task.idx) {
+                        track.playback = PlaybackInput::file(local_path);
+                        track.pending_download = None;
+                        eprintln!("Cached: {}", track.title);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("Prefetch failed for '{}': {}", task.title, err);
+            }
+        }
+    }
+}
+
+fn prepare_track_for_playback(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    track: &mut TrackInfo,
+    track_index: usize,
+    total_tracks: usize,
+    is_playlist: bool,
+    title_state: &mut TitleState,
+) -> Result<bool> {
+    if let PlaybackInput::File(path) = &track.playback {
+        if path.exists() {
+            track.pending_download = None;
+            return Ok(false);
+        }
+    }
+
+    let Some(pending) = track.pending_download.clone() else {
+        return Ok(false);
+    };
+    let cache_dir = plugin::cache_dir_path()?;
+    let (sender, receiver) = mpsc::channel();
+    let source_url = pending.source_url.clone();
+    thread::spawn(move || {
+        if let Err(err) =
+            ytdlp::download_track_with_progress(&source_url, &cache_dir, Some(sender.clone()))
+        {
+            let _ = sender.send(DownloadEvent::Error(err.to_string()));
+        }
+    });
+
+    let mut loading = LoadingState::new(
+        track.title.clone(),
+        pending.service,
+        track_index,
+        total_tracks,
+        is_playlist,
+    );
+
+    loop {
+        loading.frame_count += 1;
+        title_state.set(format_loading_title(loading.frame_count, &loading.title))?;
+        terminal.draw(|frame| draw_loading(frame, &loading))?;
+
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                DownloadEvent::Progress(progress) => {
+                    loading.progress = progress;
+                    loading.phase = LoadingPhase::Downloading;
+                }
+                DownloadEvent::Finalizing => {
+                    loading.phase = LoadingPhase::Finalizing;
+                }
+                DownloadEvent::Ready(path) => {
+                    loading.phase = LoadingPhase::Ready;
+                    track.playback = PlaybackInput::file(path);
+                    track.pending_download = None;
+                    return Ok(false);
+                }
+                DownloadEvent::Error(message) => {
+                    loading.phase = LoadingPhase::Error(message.clone());
+                    terminal.draw(|frame| draw_loading(frame, &loading))?;
+                    thread::sleep(Duration::from_millis(900));
+                    return Err(color_eyre::eyre::eyre!(message));
+                }
+            }
+        }
+
+        if event::poll(Duration::from_millis(30))? {
+            if let Event::Key(key) = event::read()? {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn format_playback_title(frame_count: u64, title: &str, paused: bool) -> String {
+    let title = truncate_title(title, 48);
+    if paused {
+        format!("⏸ looper — {title}")
+    } else {
+        format!("{} looper — {title}", spinner_frame(frame_count))
+    }
+}
+
+fn format_loading_title(frame_count: u64, title: &str) -> String {
+    let title = truncate_title(title, 40);
+    format!("{} looper — loading — {title}", spinner_frame(frame_count))
+}
+
+fn truncate_title(title: &str, max_chars: usize) -> String {
+    let mut chars = title.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn spinner_frame(frame_count: u64) -> char {
+    const FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
+    FRAMES[((frame_count / 6) as usize) % FRAMES.len()]
+}
+
+fn write_terminal_title(title: &str) -> Result<()> {
+    let mut out = stdout();
+    write!(out, "\x1b]0;{}\x07", title)?;
+    out.flush()?;
+    Ok(())
 }
