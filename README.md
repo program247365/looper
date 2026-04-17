@@ -115,7 +115,7 @@ looper play --url "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD
 
 - startup opens the local SQLite database, runs embedded migrations, and then begins loading playback
 - `yt-dlp` extracts track metadata and media URLs
-- remote audio is cached in the OS cache directory for `looper`
+- remote audio is cached locally (see [Data and Cache Locations](#data-and-cache-locations))
 - uncached remote tracks show a full-screen loading scene before playback
 - single tracks loop forever
 - playlists play each track once, then loop the entire playlist
@@ -126,10 +126,22 @@ Current behavior is intentionally pragmatic:
 - YouTube uses a download-first cached path for reliability
 - SoundCloud and HypeM prefer a stream-first path and fall back to cached download when needed
 
-## Persistence
+## Data and Cache Locations
 
-- playback history and favorites are stored in a local SQLite database
-- the database lives in the OS data directory for `looper`
+Remote tracks are cached locally after download:
+
+| Platform | Cache directory |
+|----------|----------------|
+| macOS | `~/Library/Caches/sh.kbr.looper/` |
+| Linux | `~/.cache/looper/` |
+
+Playback history and favorites live in a SQLite database:
+
+| Platform | Database path |
+|----------|---------------|
+| macOS | `~/Library/Application Support/sh.kbr.looper/looper.sqlite3` |
+| Linux | `~/.local/share/looper/looper.sqlite3` |
+
 - startup applies pending embedded migrations automatically
 - bare `looper` loads this history first and lets you replay from it
 - history is tracked per playable URL or canonical local file path
