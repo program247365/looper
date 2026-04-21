@@ -1,6 +1,6 @@
 [package]
 name = "looper"
-version = "0.3.2"
+version = "0.3.3"
 authors = ["Kevin B. Ridgway <kridgway@gmail.com>"]
 edition = "2018"
 
