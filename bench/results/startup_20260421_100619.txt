@@ -1,0 +1,5 @@
+Startup Benchmark Results
+=========================
+Runs: 10
+Average startup time: .513s
+Average initial memory: 0KB (0MB)

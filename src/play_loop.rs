@@ -232,18 +232,26 @@ fn run_loop(
     storage: SharedStorage,
     title_state: &mut TitleState,
 ) -> Result<LoopAction> {
+    // Frame rate control: only render when needed
+    const RENDER_FPS: u64 = 30; // Target 30 FPS max
+    let render_interval = Duration::from_millis(1000 / RENDER_FPS);
+    let mut last_render = Instant::now();
+    let mut needs_render = true; // Force first render
+
     loop {
+        // Update visualizer data (but don't render yet)
         if !state.paused {
             update_visualizer(state, player);
+            // When playing, we need to render for visualizer updates
+            needs_render = true;
         }
 
-        state.frame_count += 1;
-        title_state.set(format_playback_title(
-            state.frame_count,
-            &state.filename,
-            state.paused,
-        ))?;
-        terminal.draw(|f| draw(f, state))?;
+        // Check if enough time passed for next frame
+        let time_since_render = last_render.elapsed();
+        if time_since_render < render_interval {
+            // Too soon to render, check for events with shorter timeout
+            needs_render = false;
+        }
 
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
@@ -258,9 +266,11 @@ fn run_loop(
                             player.pause();
                         }
                         state.paused = !state.paused;
+                        needs_render = true;
                     }
                     KeyCommand::ToggleFullscreen => {
                         state.fullscreen = !state.fullscreen;
+                        needs_render = true;
                     }
                     KeyCommand::ToggleFavorite => {
                         if let Ok(record) = track_record(track) {
@@ -271,38 +281,45 @@ fn run_loop(
                                 refresh_history_panel(panel, &storage)?;
                             }
                         }
+                        needs_render = true;
                     }
                     KeyCommand::ToggleHistory => {
                         toggle_history_panel(state, &storage)?;
+                        needs_render = true;
                     }
                     KeyCommand::HistoryNext => {
                         if let Some(panel) = state.history_panel.as_mut() {
                             if panel.selected + 1 < panel.rows.len() {
                                 panel.selected += 1;
+                                needs_render = true;
                             }
                         }
                     }
                     KeyCommand::HistoryPrev => {
                         if let Some(panel) = state.history_panel.as_mut() {
                             panel.selected = panel.selected.saturating_sub(1);
+                            needs_render = true;
                         }
                     }
                     KeyCommand::HistorySortNext => {
                         if let Some(panel) = state.history_panel.as_mut() {
                             panel.sort_field = panel.sort_field.next();
                             refresh_history_panel(panel, &storage)?;
+                            needs_render = true;
                         }
                     }
                     KeyCommand::HistorySortPrev => {
                         if let Some(panel) = state.history_panel.as_mut() {
                             panel.sort_field = panel.sort_field.previous();
                             refresh_history_panel(panel, &storage)?;
+                            needs_render = true;
                         }
                     }
                     KeyCommand::HistoryReverse => {
                         if let Some(panel) = state.history_panel.as_mut() {
                             panel.descending = !panel.descending;
                             refresh_history_panel(panel, &storage)?;
+                            needs_render = true;
                         }
                     }
                     KeyCommand::HistoryReplay => {
@@ -328,6 +345,7 @@ fn run_loop(
                                 }
                             }
                         }
+                        needs_render = true;
                     }
                     KeyCommand::None => {}
                 }
@@ -345,6 +363,19 @@ fn run_loop(
                     state.loop_start = Instant::now();
                 }
             }
+        }
+
+        // Only render when needed (state changed or enough time passed)
+        if needs_render && last_render.elapsed() >= render_interval {
+            state.frame_count += 1;
+            title_state.set(format_playback_title(
+                state.frame_count,
+                &state.filename,
+                state.paused,
+            ))?;
+            terminal.draw(|f| draw(f, state))?;
+            last_render = Instant::now();
+            needs_render = false;
         }
     }
 }
