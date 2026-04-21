@@ -1,5 +1,7 @@
 .PHONY: help build build-release build-macos run test test-all install clean \
-        release release-patch release-minor bump-formula
+        release release-patch release-minor bump-formula \
+        bench-all bench-startup bench-playback bench-pause bench-memory bench-cpu \
+        bench-profile bench-watch bench-results bench-analyze bench-clean
 
 BINARY     := looper
 INSTALL_DIR := /usr/local/bin
@@ -44,6 +46,86 @@ install: build-release ## Install release binary to $(INSTALL_DIR)
 
 clean: ## Remove build artifacts
 	cargo clean
+
+# ── Performance Benchmarking ──────────────────────────────────────────────────
+# Usage:
+#   make bench-all        — Run all benchmarks
+#   make bench-startup    — Measure startup time and initial memory
+#   make bench-playback   — Measure memory/CPU during playback
+#   make bench-pause      — Measure pause behavior
+#   make bench-memory     — Deep memory profiling
+#   make bench-cpu        — CPU profiling
+#   make bench-profile    — Full profiling session (100s+)
+#   make bench-watch      — Real-time memory monitoring
+#   make bench-results    — Show latest results
+#   make bench-analyze    — Analyze results and identify memory hogs
+#   make bench-clean      — Clean benchmark results
+
+BENCH_DIR := bench
+BENCH_SCRIPTS := $(BENCH_DIR)/scripts
+BENCH_RESULTS := $(BENCH_DIR)/results
+
+bench-setup:
+	@mkdir -p $(BENCH_RESULTS)
+	@$(MAKE) build-release
+
+bench-all: bench-setup ## Run all performance benchmarks
+	@echo "=== Running Full Benchmark Suite ==="
+	@$(MAKE) bench-startup
+	@$(MAKE) bench-playback
+	@$(MAKE) bench-pause
+	@$(MAKE) bench-memory
+	@$(MAKE) bench-cpu
+	@echo ""
+	@echo "=== Benchmark Complete ==="
+	@$(MAKE) bench-results
+
+bench-startup: bench-setup ## Measure startup performance
+	@$(BENCH_SCRIPTS)/bench-startup.sh
+
+bench-playback: bench-setup ## Measure playback performance (30s)
+	@$(BENCH_SCRIPTS)/bench-playback.sh
+
+bench-pause: bench-setup ## Measure pause behavior
+	@$(BENCH_SCRIPTS)/bench-pause.sh
+
+bench-memory: bench-setup ## Deep memory profiling (2min)
+	@$(BENCH_SCRIPTS)/memory-profile.sh
+
+bench-cpu: bench-setup ## CPU profiling (30s)
+	@$(BENCH_SCRIPTS)/cpu-profile.sh
+
+bench-profile: bench-setup ## Full profiling session (~100s)
+	@$(BENCH_SCRIPTS)/full-profile.sh
+
+bench-watch: ## Real-time memory monitoring (Ctrl+C to stop)
+	@$(BENCH_SCRIPTS)/watch-memory.sh
+
+bench-results: ## Show latest benchmark results
+	@echo "=== Latest Benchmark Results ==="
+	@if [ -d $(BENCH_RESULTS) ] && [ -n "$$(ls -A $(BENCH_RESULTS) 2>/dev/null)" ]; then \
+		echo ""; \
+		echo "Startup:"; \
+		ls -t $(BENCH_RESULTS)/startup_*.txt 2>/dev/null | head -1 | xargs tail -n +2 || echo "  No results"; \
+		echo ""; \
+		echo "Playback:"; \
+		ls -t $(BENCH_RESULTS)/playback_*_summary.txt 2>/dev/null | head -1 | xargs tail -n +2 || echo "  No results"; \
+		echo ""; \
+		echo "Memory Profile:"; \
+		ls -t $(BENCH_RESULTS)/memory_profile_*_summary.txt 2>/dev/null | head -1 | xargs tail -n +2 || echo "  No results"; \
+		echo ""; \
+		echo "All results in: $(BENCH_RESULTS)/"; \
+	else \
+		echo "No results found. Run 'make bench-all' first."; \
+	fi
+
+bench-analyze: ## Analyze results and identify memory hogs
+	@$(BENCH_SCRIPTS)/analyze-results.sh
+
+bench-clean: ## Clean benchmark results
+	@echo "Cleaning benchmark results..."
+	@rm -rf $(BENCH_RESULTS)/*
+	@echo "✓ Clean complete"
 
 # ── Homebrew release workflow ─────────────────────────────────────────────────
 # Usage:
