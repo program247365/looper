@@ -18,7 +18,7 @@ use std::{
 };
 
 use crate::download::CacheStatus;
-use crate::storage::{HistoryRow, HistorySortField};
+use crate::storage::{HistoryRow, HistorySortField, SyncWarning};
 
 pub const N_BANDS: usize = 32;
 const PROGRESS_KNOB: char = '•';
@@ -42,6 +42,7 @@ pub struct AppState {
     pub frame_count: u64,
     pub cache_status: Option<CacheStatus>,
     pub history_panel: Option<HistoryPanelState>,
+    pub sync_warning: Option<SyncWarning>,
 }
 
 #[derive(Clone)]
@@ -57,6 +58,7 @@ pub struct StartupScreenState {
     pub status: String,
     pub logs: Vec<String>,
     pub frame_count: u64,
+    pub sync_warning: Option<SyncWarning>,
 }
 
 impl AppState {
@@ -84,11 +86,30 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     Ok(())
 }
 
+/// Height (in rows) consumed by the sync-warning banner when present.
+/// Bordered box: 1 top border + 5 content lines + 1 bottom border.
+const SYNC_WARNING_HEIGHT: u16 = 7;
+
 pub fn draw(frame: &mut ratatui::Frame, state: &AppState) {
+    let body_area = match state.sync_warning.as_ref() {
+        Some(warning) => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(SYNC_WARNING_HEIGHT),
+                    Constraint::Min(0),
+                ])
+                .split(frame.size());
+            draw_sync_warning(frame, chunks[0], warning);
+            chunks[1]
+        }
+        None => frame.size(),
+    };
+
     if state.fullscreen {
-        draw_fullscreen(frame, state);
+        draw_fullscreen_in(frame, body_area, state);
     } else {
-        draw_normal(frame, state);
+        draw_normal_in(frame, body_area, state);
     }
 
     if let Some(panel) = &state.history_panel {
@@ -96,8 +117,66 @@ pub fn draw(frame: &mut ratatui::Frame, state: &AppState) {
     }
 }
 
+fn draw_sync_warning(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, warning: &SyncWarning) {
+    let label_style = Style::default()
+        .fg(Color::Rgb(255, 200, 90))
+        .add_modifier(Modifier::BOLD);
+    let value_style = Style::default().fg(Color::Rgb(230, 230, 240));
+    let dim_style = Style::default().fg(Color::Rgb(170, 170, 190));
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("⚠ ", label_style),
+            Span::styled(
+                "History sync disabled — running on local DB",
+                Style::default()
+                    .fg(Color::Rgb(255, 200, 90))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Path:    ", label_style),
+            Span::styled(warning.attempted_path.display().to_string(), value_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Reason:  ", label_style),
+            Span::styled(warning.reason.clone(), value_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Fix:     ", label_style),
+            Span::styled(
+                "System Settings → Privacy & Security → Full Disk Access",
+                value_style,
+            ),
+        ]),
+        Line::from(vec![Span::styled(
+            "           Add and enable your terminal app, then restart looper.",
+            dim_style,
+        )]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Rgb(255, 170, 60)));
+
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
-    let area = frame.size();
+    let area = match state.sync_warning.as_ref() {
+        Some(warning) => {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(SYNC_WARNING_HEIGHT),
+                    Constraint::Min(0),
+                ])
+                .split(frame.size());
+            draw_sync_warning(frame, split[0], warning);
+            split[1]
+        }
+        None => frame.size(),
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -156,8 +235,25 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
     );
 }
 
-pub fn draw_history_browser(frame: &mut ratatui::Frame, panel: &HistoryPanelState) {
-    let area = frame.size();
+pub fn draw_history_browser(
+    frame: &mut ratatui::Frame,
+    panel: &HistoryPanelState,
+    sync_warning: Option<&SyncWarning>,
+) {
+    let area = match sync_warning {
+        Some(warning) => {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(SYNC_WARNING_HEIGHT),
+                    Constraint::Min(0),
+                ])
+                .split(frame.size());
+            draw_sync_warning(frame, split[0], warning);
+            split[1]
+        }
+        None => frame.size(),
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -210,9 +306,7 @@ pub fn draw_history_browser(frame: &mut ratatui::Frame, panel: &HistoryPanelStat
     );
 }
 
-fn draw_normal(frame: &mut ratatui::Frame, state: &AppState) {
-    let area = frame.size();
-
+fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -229,9 +323,7 @@ fn draw_normal(frame: &mut ratatui::Frame, state: &AppState) {
     draw_footer(frame, chunks[3]);
 }
 
-fn draw_fullscreen(frame: &mut ratatui::Frame, state: &AppState) {
-    let area = frame.size();
-
+fn draw_fullscreen_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
     // Visualizer fills everything except a 1-row status strip at the bottom
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -889,4 +981,82 @@ fn format_total_play_time(total_seconds: i64) -> String {
 fn spinner_frame(frame_count: u64) -> char {
     const FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
     FRAMES[((frame_count / 6) as usize) % FRAMES.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    fn buffer_contains(terminal: &Terminal<TestBackend>, needle: &str) -> bool {
+        let buffer = terminal.backend().buffer();
+        for y in 0..buffer.area.height {
+            let line: String = (0..buffer.area.width)
+                .map(|x| buffer.get(x, y).symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if line.contains(needle) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn sample_warning() -> SyncWarning {
+        SyncWarning {
+            attempted_path: PathBuf::from(
+                "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/looper/looper.sqlite3",
+            ),
+            reason: "failed to open looper database: authorization denied".into(),
+        }
+    }
+
+    #[test]
+    fn startup_renders_sync_warning_banner() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = StartupScreenState {
+            status: "loading".into(),
+            logs: vec!["warming up".into()],
+            frame_count: 0,
+            sync_warning: Some(sample_warning()),
+        };
+        terminal.draw(|frame| draw_startup(frame, &state)).unwrap();
+        assert!(buffer_contains(&terminal, "History sync disabled"));
+        assert!(buffer_contains(&terminal, "Full Disk Access"));
+        assert!(buffer_contains(&terminal, "looper.sqlite3"));
+    }
+
+    #[test]
+    fn history_browser_renders_sync_warning_banner() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let panel = HistoryPanelState {
+            rows: vec![],
+            selected: 0,
+            sort_field: HistorySortField::TimePlayed,
+            descending: true,
+        };
+        let warning = sample_warning();
+        terminal
+            .draw(|frame| draw_history_browser(frame, &panel, Some(&warning)))
+            .unwrap();
+        assert!(buffer_contains(&terminal, "History sync disabled"));
+        assert!(buffer_contains(&terminal, "Full Disk Access"));
+    }
+
+    #[test]
+    fn startup_without_warning_omits_banner() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = StartupScreenState {
+            status: "loading".into(),
+            logs: vec!["warming up".into()],
+            frame_count: 0,
+            sync_warning: None,
+        };
+        terminal.draw(|frame| draw_startup(frame, &state)).unwrap();
+        assert!(!buffer_contains(&terminal, "History sync disabled"));
+    }
 }

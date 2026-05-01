@@ -23,7 +23,7 @@ use crate::download::{DownloadEvent, LoadingPhase};
 use crate::media_controls::MediaSessionHandle;
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, ytdlp, TrackInfo};
-use crate::storage::{track_record, HistorySortField, SharedStorage, Storage};
+use crate::storage::{track_record, HistorySortField, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
     draw, draw_history_browser, draw_startup, restore_terminal, setup_terminal, AppState,
     HistoryPanelState, StartupScreenState, N_BANDS,
@@ -84,11 +84,14 @@ fn browse_history_session(
         status: "db migrations... teaching SQLite to keep a beat".to_string(),
         logs: startup_logs(),
         frame_count: 0,
+        sync_warning: None,
     };
     title_state.set("looper — playlist history".to_string())?;
     terminal.draw(|frame| draw_startup(frame, &startup))?;
 
-    let storage = Storage::open_and_migrate()?.shared();
+    let (storage, sync_warning) = Storage::open_and_migrate()?;
+    let storage = storage.shared();
+    startup.sync_warning = sync_warning.clone();
     let mut panel = HistoryPanelState {
         rows: Vec::new(),
         selected: 0,
@@ -100,7 +103,7 @@ fn browse_history_session(
     loop {
         startup.frame_count += 1;
         title_state.set("looper — playlist history".to_string())?;
-        terminal.draw(|frame| draw_history_browser(frame, &panel))?;
+        terminal.draw(|frame| draw_history_browser(frame, &panel, sync_warning.as_ref()))?;
 
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
@@ -166,10 +169,13 @@ fn play_file_session(
         status: "db migrations... teaching SQLite to keep a beat".to_string(),
         logs: startup_logs(),
         frame_count: 0,
+        sync_warning: None,
     };
     title_state.set("looper — booting".to_string())?;
     terminal.draw(|frame| draw_startup(frame, &startup))?;
-    let storage = Storage::open_and_migrate()?.shared();
+    let (storage, sync_warning) = Storage::open_and_migrate()?;
+    let storage = storage.shared();
+    startup.sync_warning = sync_warning.clone();
 
     loop {
         startup.frame_count += 1;
@@ -193,6 +199,7 @@ fn play_file_session(
                 }],
                 false,
                 ctx,
+                sync_warning.as_ref(),
             )?,
             Some(tracks) => {
                 let is_playlist = tracks.len() > 1;
@@ -204,6 +211,7 @@ fn play_file_session(
                     tracks,
                     is_playlist,
                     ctx,
+                    sync_warning.as_ref(),
                 )?
             }
         };
@@ -699,9 +707,18 @@ fn play_tracks(
     tracks: Vec<TrackInfo>,
     is_playlist: bool,
     ctx: &PlaybackContext,
+    sync_warning: Option<&SyncWarning>,
 ) -> Result<Option<String>> {
     if is_playlist {
-        loop_playlist(terminal, source_url, tracks, storage, title_state, ctx)
+        loop_playlist(
+            terminal,
+            source_url,
+            tracks,
+            storage,
+            title_state,
+            ctx,
+            sync_warning,
+        )
     } else {
         match play_single_track(
             terminal,
@@ -712,6 +729,7 @@ fn play_tracks(
             storage,
             title_state,
             ctx,
+            sync_warning,
         )? {
             LoopAction::Quit => Ok(None),
             LoopAction::NextTrack | LoopAction::PreviousTrack => Ok(None),
@@ -727,6 +745,7 @@ fn loop_playlist(
     storage: SharedStorage,
     title_state: &mut TitleState,
     ctx: &PlaybackContext,
+    sync_warning: Option<&SyncWarning>,
 ) -> Result<Option<String>> {
     let mut tracks = initial_tracks;
     loop {
@@ -754,6 +773,7 @@ fn loop_playlist(
                 storage.clone(),
                 title_state,
                 ctx,
+                sync_warning,
             )? {
                 LoopAction::Quit => return Ok(None),
                 LoopAction::NextTrack => idx += 1,
@@ -780,6 +800,7 @@ fn play_single_track(
     storage: SharedStorage,
     title_state: &mut TitleState,
     ctx: &PlaybackContext,
+    sync_warning: Option<&SyncWarning>,
 ) -> Result<LoopAction> {
     if prepare_track_for_playback(
         terminal,
@@ -788,6 +809,7 @@ fn play_single_track(
         total_tracks,
         is_playlist,
         title_state,
+        sync_warning,
     )? {
         return Ok(LoopAction::Quit);
     }
@@ -803,6 +825,7 @@ fn play_single_track(
         None,
         "patching cables into the tiny disco".to_string(),
         0,
+        sync_warning,
     )?;
     let player = AudioPlayer::new(track.playback.clone(), !is_playlist)?;
     wait_for_player_ready(
@@ -813,6 +836,7 @@ fn play_single_track(
         total_tracks,
         is_playlist,
         &player,
+        sync_warning,
     )?;
     let record = track_record(&track)?;
     {
@@ -842,6 +866,7 @@ fn play_single_track(
         frame_count: 0,
         cache_status: None,
         history_panel: None,
+        sync_warning: sync_warning.cloned(),
     };
 
     if let Some(media) = &ctx.media {
@@ -958,6 +983,7 @@ fn prepare_track_for_playback(
     total_tracks: usize,
     is_playlist: bool,
     title_state: &mut TitleState,
+    sync_warning: Option<&SyncWarning>,
 ) -> Result<bool> {
     if let PlaybackInput::File(path) = &track.playback {
         if path.exists() {
@@ -998,6 +1024,7 @@ fn prepare_track_for_playback(
             progress.clone(),
             note.clone(),
             frame_count,
+            sync_warning,
         )?;
 
         while let Ok(event) = receiver.try_recv() {
@@ -1028,6 +1055,7 @@ fn prepare_track_for_playback(
                         progress.clone(),
                         message.clone(),
                         frame_count,
+                        sync_warning,
                     )?;
                     thread::sleep(Duration::from_millis(900));
                     return Err(color_eyre::eyre::eyre!(message));
@@ -1056,6 +1084,7 @@ fn wait_for_player_ready(
     total_tracks: usize,
     is_playlist: bool,
     player: &AudioPlayer,
+    sync_warning: Option<&SyncWarning>,
 ) -> Result<()> {
     let start = Instant::now();
     let mut frame_count = 0_u64;
@@ -1078,6 +1107,7 @@ fn wait_for_player_ready(
             None,
             "priming the speakers so the first hit lands clean".to_string(),
             frame_count,
+            sync_warning,
         )?;
         thread::sleep(Duration::from_millis(30));
     }
@@ -1094,6 +1124,7 @@ fn render_track_startup(
     progress: Option<crate::download::DownloadProgress>,
     note: String,
     frame_count: u64,
+    sync_warning: Option<&SyncWarning>,
 ) -> Result<()> {
     title_state.set(format_loading_title(frame_count, &track.title))?;
     let status = startup_status(
@@ -1108,6 +1139,7 @@ fn render_track_startup(
         status,
         logs: track_startup_logs(note),
         frame_count,
+        sync_warning: sync_warning.cloned(),
     };
     terminal.draw(|frame| draw_startup(frame, &startup))?;
     Ok(())
@@ -1269,6 +1301,7 @@ mod tests {
             frame_count: 0,
             cache_status: None,
             history_panel: None,
+            sync_warning: None,
         }
     }
 

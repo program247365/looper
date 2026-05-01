@@ -21,6 +21,16 @@ pub struct Storage {
 
 pub type SharedStorage = Arc<Mutex<Storage>>;
 
+/// Surfaced to the TUI when the configured sync database (e.g. iCloud Drive)
+/// can't be opened and we silently fall back to the local DB. The TUI shows
+/// this as a persistent banner so the user knows sync is off until they grant
+/// access — `eprintln!` from inside the alternate-screen TUI is invisible.
+#[derive(Clone, Debug)]
+pub struct SyncWarning {
+    pub attempted_path: PathBuf,
+    pub reason: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HistorySortField {
     TimePlayed,
@@ -132,26 +142,22 @@ impl From<PlayedTrackRow> for HistoryRow {
 }
 
 impl Storage {
-    pub fn open_and_migrate() -> Result<Self> {
+    pub fn open_and_migrate() -> Result<(Self, Option<SyncWarning>)> {
         let new_path = resolve_db_path()?;
         let old_path = default_db_path()?;
 
         // Try the resolved path (iCloud / configured folder / default).
         // If access is denied — common on a fresh macOS machine where the terminal
         // hasn't been granted Full Disk Access — fall back to the local default and
-        // print a one-time actionable message so the user knows how to fix it.
-        let storage = match Self::open_and_migrate_at(new_path.clone()) {
-            Ok(s) => s,
+        // surface a SyncWarning so the TUI can display a persistent banner.
+        let (storage, sync_warning) = match Self::open_and_migrate_at(new_path.clone()) {
+            Ok(s) => (s, None),
             Err(err) if new_path != old_path => {
-                eprintln!(
-                    "looper: cannot open sync database at {path}\n  \
-                     Reason: {err}\n  \
-                     Fix:    System Settings → Privacy & Security → Full Disk Access → \
-                     enable your terminal app (Terminal, iTerm2, etc.)\n  \
-                     Falling back to local database until then.",
-                    path = new_path.display(),
-                );
-                Self::open_and_migrate_at(old_path.clone())?
+                let warning = SyncWarning {
+                    attempted_path: new_path.clone(),
+                    reason: err.to_string(),
+                };
+                (Self::open_and_migrate_at(old_path.clone())?, Some(warning))
             }
             Err(err) => return Err(err),
         };
@@ -172,7 +178,7 @@ impl Storage {
             }
         }
 
-        Ok(storage)
+        Ok((storage, sync_warning))
     }
 
     pub fn shared(self) -> SharedStorage {
