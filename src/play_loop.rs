@@ -265,9 +265,9 @@ fn run_loop(
         // Update visualizer data (but don't render yet)
         if !state.paused {
             update_visualizer(state, player);
-            // When playing, we need to render for visualizer updates
-            needs_render = true;
         }
+        // Always render when playing or paused (wave screensaver needs frame_count to advance)
+        needs_render = true;
 
         // Check if enough time passed for next frame
         let time_since_render = last_render.elapsed();
