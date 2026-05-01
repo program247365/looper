@@ -1016,6 +1016,21 @@ fn prepare_track_for_playback(
 ) -> Result<bool> {
     if let PlaybackInput::File(path) = &track.playback {
         if path.exists() {
+            // Audio is already cached. Backfill the thumbnail if it's missing
+            // and we have a remote source URL — covers the case where the mp3
+            // was downloaded before --write-thumbnail was added to the audio
+            // download command.
+            if track.thumbnail_path.is_none() {
+                if let (Some(stem), Some(source_url)) = (
+                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string),
+                    track.source_url.clone(),
+                ) {
+                    if let Ok(cache_dir) = plugin::cache_dir_path() {
+                        let _ = ytdlp::download_thumbnail_only(&source_url, &cache_dir);
+                        track.thumbnail_path = ytdlp::thumbnail_for(&cache_dir, &stem);
+                    }
+                }
+            }
             track.pending_download = None;
             return Ok(false);
         }

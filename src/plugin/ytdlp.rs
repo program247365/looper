@@ -153,6 +153,32 @@ pub fn thumbnail_for(cache_dir: &Path, id: &str) -> Option<PathBuf> {
     None
 }
 
+/// Backfill: fetch only the thumbnail for `url` into `cache_dir`. Used when
+/// the audio is already cached (so the audio download path doesn't run) but
+/// no thumbnail file exists yet — typical for tracks downloaded before the
+/// --write-thumbnail flag was added.
+///
+/// Non-fatal: errors are returned but the caller is expected to swallow them.
+pub fn download_thumbnail_only(url: &str, cache_dir: &Path) -> Result<()> {
+    let output_template = cache_dir.join("%(id)s.%(ext)s");
+    let status = Command::new("yt-dlp")
+        .arg("--skip-download")
+        .arg("--write-thumbnail")
+        .arg("--convert-thumbnails")
+        .arg("jpg")
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        .arg("-o")
+        .arg(&output_template)
+        .arg(url)
+        .status()
+        .wrap_err("failed to execute yt-dlp thumbnail backfill")?;
+    if !status.success() {
+        bail!("yt-dlp thumbnail backfill exited with non-success status");
+    }
+    Ok(())
+}
+
 pub fn download_track_with_progress(
     url: &str,
     cache_dir: &Path,
