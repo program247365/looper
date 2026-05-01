@@ -79,11 +79,22 @@ pub fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, Option<Pi
     let mut out = stdout();
     execute!(out, EnterAlternateScreen)?;
     let terminal = Terminal::new(CrosstermBackend::new(out))?;
-    // Best-effort terminal-protocol detection. Falls back to halfblocks-only
-    // if the stdio query fails (e.g. macOS Terminal.app doesn't answer).
-    let picker = Picker::from_query_stdio()
-        .ok()
-        .or(Some(Picker::halfblocks()));
+
+    // Picker selection. Defaults to halfblocks because protocol auto-detection
+    // is unreliable on macOS Terminal.app (it claims to support a graphics
+    // protocol but renders the escape sequences as missing-glyph tofu).
+    // Halfblocks works in every terminal and looks decent for ~20-col thumbs.
+    //
+    // Override: set LOOPER_IMAGE_PROTOCOL=auto to opt back into auto-detect
+    // (recommended only for known-good terminals: iTerm2, Kitty, Ghostty).
+    // LOOPER_IMAGE_PROTOCOL=none disables thumbnails entirely.
+    let picker = match std::env::var("LOOPER_IMAGE_PROTOCOL").ok().as_deref() {
+        Some("none") => None,
+        Some("auto") => Picker::from_query_stdio()
+            .ok()
+            .or(Some(Picker::halfblocks())),
+        _ => Some(Picker::halfblocks()),
+    };
     Ok((terminal, picker))
 }
 
