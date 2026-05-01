@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
     Terminal,
 };
 use std::{
@@ -866,54 +866,75 @@ fn draw_history_table(
     ])];
     frame.render_widget(Paragraph::new(header), chunks[0]);
 
-    let mut rows = Vec::new();
     if panel.rows.is_empty() {
-        rows.push(Line::from(vec![Span::styled(
-            "No songs played yet. Play something once and it will show up here.",
-            Style::default().fg(Color::Rgb(180, 180, 200)),
-        )]));
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(vec![Span::styled(
+                "No songs played yet. Play something once and it will show up here.",
+                Style::default().fg(Color::Rgb(180, 180, 200)),
+            )])]),
+            chunks[1],
+        );
     } else {
-        rows.push(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("Title", Style::default().fg(Color::Rgb(255, 180, 80))),
-            Span::raw("                        "),
-            Span::styled("Platform", Style::default().fg(Color::Rgb(255, 180, 80))),
-            Span::raw("   "),
-            Span::styled("Last Played", Style::default().fg(Color::Rgb(255, 180, 80))),
-            Span::raw("   "),
-            Span::styled("Time", Style::default().fg(Color::Rgb(255, 180, 80))),
-            Span::raw("   "),
-            Span::styled("Plays", Style::default().fg(Color::Rgb(255, 180, 80))),
-        ]));
+        let widths = [
+            Constraint::Length(1),  // favorite marker
+            Constraint::Min(20),    // title — flexes with terminal width
+            Constraint::Length(10), // platform
+            Constraint::Length(16), // last played: YYYY-MM-DD HH:MM
+            Constraint::Length(8),  // total time, right-aligned
+            Constraint::Length(5),  // play count, right-aligned
+        ];
 
-        for (idx, row) in panel.rows.iter().enumerate() {
-            let selected = idx == panel.selected;
-            let style = if selected {
-                Style::default().bg(Color::Rgb(45, 45, 65)).fg(Color::White)
-            } else {
-                Style::default().fg(Color::Rgb(210, 210, 220))
-            };
-            let marker = if row.is_favorite { "*" } else { " " };
-            let title = truncate_text(&row.title, 24);
-            let platform = truncate_text(&row.platform, 8);
-            let last_played = format_timestamp(row.last_played_at);
-            let total_time = format_total_play_time(row.total_play_seconds);
-            rows.push(Line::from(vec![
-                Span::styled(format!("{marker} "), style.fg(Color::Yellow)),
-                Span::styled(format!("{title:<24}"), style),
-                Span::raw("  "),
-                Span::styled(format!("{platform:<8}"), style),
-                Span::raw("  "),
-                Span::styled(format!("{last_played:<16}"), style),
-                Span::raw("  "),
-                Span::styled(format!("{total_time:>7}"), style),
-                Span::raw("  "),
-                Span::styled(format!("{:>5}", row.play_count), style),
-            ]));
-        }
+        let header_color = Color::Rgb(255, 180, 80);
+        let header_style = Style::default()
+            .fg(header_color)
+            .add_modifier(Modifier::BOLD);
+        let header_row = Row::new(vec![
+            Cell::from(""),
+            Cell::from("Title"),
+            Cell::from("Platform"),
+            Cell::from("Last Played"),
+            Cell::from(Line::from("Time").alignment(Alignment::Right)),
+            Cell::from(Line::from("Plays").alignment(Alignment::Right)),
+        ])
+        .style(header_style)
+        .bottom_margin(1);
+
+        let dim_style = Style::default().fg(Color::Rgb(170, 175, 200));
+        let body_rows: Vec<Row> = panel
+            .rows
+            .iter()
+            .map(|row| {
+                let marker = if row.is_favorite { "★" } else { " " };
+                let last_played = format_timestamp(row.last_played_at);
+                let total_time = format_total_play_time(row.total_play_seconds);
+                Row::new(vec![
+                    Cell::from(marker).style(Style::default().fg(Color::Yellow)),
+                    Cell::from(row.title.clone()),
+                    Cell::from(row.platform.clone()).style(dim_style),
+                    Cell::from(last_played).style(dim_style),
+                    Cell::from(Line::from(total_time).alignment(Alignment::Right)),
+                    Cell::from(
+                        Line::from(format!("{}", row.play_count)).alignment(Alignment::Right),
+                    ),
+                ])
+            })
+            .collect();
+
+        let table = Table::new(body_rows, widths)
+            .header(header_row)
+            .column_spacing(2)
+            .style(Style::default().fg(Color::Rgb(210, 210, 220)))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(45, 45, 65))
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            );
+
+        let mut state = TableState::default();
+        state.select(Some(panel.selected));
+        frame.render_stateful_widget(table, chunks[1], &mut state);
     }
-
-    frame.render_widget(Paragraph::new(rows), chunks[1]);
     frame.render_widget(
         Paragraph::new(vec![Line::from(vec![Span::styled(
             footer_text,
@@ -953,16 +974,6 @@ fn format_timestamp(timestamp: i64) -> String {
         .single()
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "Unknown".to_string())
-}
-
-fn truncate_text(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
 }
 
 fn format_total_play_time(total_seconds: i64) -> String {
