@@ -1,5 +1,5 @@
 .PHONY: help build build-release build-macos run test test-all install clean \
-        release release-patch release-minor bump-formula \
+        release release-patch release-minor bump-formula wait-for-release-assets smoke-test \
         bench-all bench-startup bench-playback bench-pause bench-memory bench-cpu \
         bench-profile bench-watch bench-results bench-analyze bench-clean
 
@@ -143,30 +143,80 @@ release-minor: ## Bump minor version and release
 	cargo set-version --bump minor
 	$(MAKE) release
 
-release: ## Tag, push, create GitHub release, and update Homebrew formula
+release: ## Tag, push, wait for CI binaries, then update Homebrew tap
 	@echo "Releasing v$(VERSION)..."
 	git add Cargo.toml Cargo.lock
 	git diff --cached --quiet || git commit -m "Bump version to v$(VERSION)"
 	git tag v$(VERSION)
 	git push origin main
 	git push origin v$(VERSION)
-	gh release create v$(VERSION) \
-		--repo program247365/looper \
-		--title "v$(VERSION)" \
-		--generate-notes
+	@echo "Tag pushed. CI will build binaries and create the GitHub release."
 	$(MAKE) bump-formula
 
-bump-formula: ## Update Homebrew tap formula to current version
-	$(eval SHA256 := $(shell curl -sL "https://github.com/program247365/looper/archive/refs/tags/v$(VERSION).tar.gz" | shasum -a 256 | awk '{print $$1}'))
-	@echo "SHA256: $(SHA256)"
-	rm -rf $(TAP_DIR)
-	git clone $(TAP_REPO) $(TAP_DIR)
-	sed -i '' \
-		-e 's|url ".*"|url "https://github.com/program247365/looper/archive/refs/tags/v$(VERSION).tar.gz"|' \
-		-e 's|sha256 ".*"|sha256 "$(SHA256)"|' \
-		$(TAP_DIR)/Formula/looper.rb
-	cd $(TAP_DIR) && git add Formula/looper.rb && \
-		git commit -m "Update looper to v$(VERSION)" && \
-		git push origin main
-	rm -rf $(TAP_DIR)
-	@echo "Done. Install with: brew tap program247365/tap && brew install looper"
+wait-for-release-assets: ## Wait until both arch tarballs are attached to the GH release
+	@echo "Waiting for v$(VERSION) release assets (arm64 + x86_64)..."
+	@for i in $$(seq 1 90); do \
+		ASSETS=$$(gh release view v$(VERSION) --repo program247365/looper --json assets --jq '.assets[].name' 2>/dev/null || true); \
+		ARM=$$(echo "$$ASSETS" | grep -c "looper-aarch64-apple-darwin.tar.gz" || true); \
+		X86=$$(echo "$$ASSETS" | grep -c "looper-x86_64-apple-darwin.tar.gz" || true); \
+		if [ "$$ARM" = "1" ] && [ "$$X86" = "1" ]; then \
+			echo "Both assets present."; \
+			exit 0; \
+		fi; \
+		printf "  (%02d/90) waiting... arm64=%s x86_64=%s\n" "$$i" "$$ARM" "$$X86"; \
+		sleep 10; \
+	done; \
+	echo "Timed out waiting for release assets. Check: gh run list --repo program247365/looper"; \
+	exit 1
+
+bump-formula: wait-for-release-assets ## Update tap formula with prebuilt binary URLs + SHA256s
+	@set -e; \
+	  ARM_URL="https://github.com/program247365/looper/releases/download/v$(VERSION)/looper-aarch64-apple-darwin.tar.gz"; \
+	  X86_URL="https://github.com/program247365/looper/releases/download/v$(VERSION)/looper-x86_64-apple-darwin.tar.gz"; \
+	  echo "Computing SHA256s..."; \
+	  ARM_SHA=$$(curl -fsSL "$$ARM_URL" | shasum -a 256 | awk '{print $$1}'); \
+	  X86_SHA=$$(curl -fsSL "$$X86_URL" | shasum -a 256 | awk '{print $$1}'); \
+	  echo "  arm64:  $$ARM_SHA"; \
+	  echo "  x86_64: $$X86_SHA"; \
+	  rm -rf $(TAP_DIR); \
+	  git clone $(TAP_REPO) $(TAP_DIR); \
+	  bash scripts/render-formula.sh "$(VERSION)" "$$ARM_SHA" "$$X86_SHA" > $(TAP_DIR)/Formula/looper.rb; \
+	  cd $(TAP_DIR) && git add Formula/looper.rb && \
+	    git commit -m "Update looper to v$(VERSION)" && \
+	    git push origin main; \
+	  rm -rf $(TAP_DIR); \
+	  echo "Done. Users now get a prebuilt binary on 'brew upgrade looper'."
+
+smoke-test: ## Verify the published formula installs the prebuilt binary cleanly
+	@echo "Smoke-testing prebuilt install for v$(VERSION)..."
+	@brew tap program247365/tap >/dev/null 2>&1 || true
+	@echo "==> Refreshing tap..."
+	@brew update --quiet
+	@echo "==> Asserting formula uses prebuilt-binary install path..."
+	@brew cat program247365/tap/looper | grep -q 'bin.install "looper"' || \
+	  (echo "FAIL: formula is not on the prebuilt path"; exit 1)
+	@echo "==> Asserting tap formula version matches Cargo.toml..."
+	@TAP_VERSION=$$(brew cat program247365/tap/looper | awk -F'"' '/^  version /{print $$2; exit}'); \
+	  if [ "$$TAP_VERSION" != "$(VERSION)" ]; then \
+	    echo "FAIL: tap has v$$TAP_VERSION but Cargo.toml is v$(VERSION) — run 'make bump-formula' first"; \
+	    exit 1; \
+	  fi; \
+	  echo "  tap version: $$TAP_VERSION"
+	@echo "==> Reinstalling..."
+	@if brew list --versions program247365/tap/looper >/dev/null 2>&1; then \
+	  brew reinstall program247365/tap/looper; \
+	else \
+	  brew install program247365/tap/looper; \
+	fi
+	@echo "==> Verifying binary..."
+	@INSTALLED=$$(brew list --versions program247365/tap/looper | awk '{print $$2}'); \
+	  if [ "$$INSTALLED" != "$(VERSION)" ]; then \
+	    echo "FAIL: brew installed v$$INSTALLED but expected v$(VERSION)"; \
+	    exit 1; \
+	  fi; \
+	  echo "  installed: v$$INSTALLED"
+	@LOOPER_BIN="$$(brew --prefix)/bin/looper"; \
+	  "$$LOOPER_BIN" --help >/dev/null 2>&1 && echo "  --help:   OK" || \
+	    (echo "FAIL: $$LOOPER_BIN --help failed"; exit 1)
+	@echo ""
+	@echo "Smoke test passed for v$(VERSION)."
