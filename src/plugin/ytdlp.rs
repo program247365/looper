@@ -17,7 +17,6 @@ pub struct MetadataEntry {
     pub title: String,
     pub duration_secs: Option<f64>,
     pub webpage_url: String,
-    pub thumbnail_url: Option<String>,
 }
 
 pub fn check_installed() -> Result<()> {
@@ -58,7 +57,6 @@ pub fn resolve_url(url: &str, cache_dir: &Path, service: &str) -> Result<Vec<Tra
                 source_url: Some(track.webpage_url),
                 pending_download,
                 service: Some(service.to_string()),
-                thumbnail_url: track.thumbnail_url,
                 thumbnail_path,
             })
         })
@@ -83,7 +81,6 @@ pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
                 source_url: Some(entry.webpage_url),
                 pending_download: None,
                 service: Some(service),
-                thumbnail_url: entry.thumbnail_url,
                 thumbnail_path: None,
             })
         })
@@ -298,14 +295,11 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
         })
         .unwrap_or_else(|| fallback_url.to_string());
 
-    let thumbnail_url = first_str(&value, &["thumbnail"]).map(str::to_string);
-
     Ok(MetadataEntry {
         id,
         title,
         duration_secs,
         webpage_url,
-        thumbnail_url,
     })
 }
 

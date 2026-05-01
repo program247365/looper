@@ -22,7 +22,6 @@ pub struct TrackInfo {
     pub source_url: Option<String>,
     pub pending_download: Option<PendingDownload>,
     pub service: Option<String>,
-    pub thumbnail_url: Option<String>,
     pub thumbnail_path: Option<PathBuf>,
 }
 

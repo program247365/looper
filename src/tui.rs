@@ -12,6 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
     Terminal,
 };
+use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
 use std::{
     io::{stdout, Stdout},
     time::{Duration, Instant},
@@ -43,6 +44,7 @@ pub struct AppState {
     pub cache_status: Option<CacheStatus>,
     pub history_panel: Option<HistoryPanelState>,
     pub sync_warning: Option<SyncWarning>,
+    pub thumbnail: Option<StatefulProtocol>,
 }
 
 #[derive(Clone)]
@@ -72,12 +74,17 @@ impl AppState {
     }
 }
 
-pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+pub fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, Option<Picker>)> {
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen)?;
     let terminal = Terminal::new(CrosstermBackend::new(out))?;
-    Ok(terminal)
+    // Best-effort terminal-protocol detection. Falls back to halfblocks-only
+    // if the stdio query fails (e.g. macOS Terminal.app doesn't answer).
+    let picker = Picker::from_query_stdio()
+        .ok()
+        .or(Some(Picker::halfblocks()));
+    Ok((terminal, picker))
 }
 
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
@@ -90,7 +97,7 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
 /// Bordered box: 1 top border + 5 content lines + 1 bottom border.
 const SYNC_WARNING_HEIGHT: u16 = 7;
 
-pub fn draw(frame: &mut ratatui::Frame, state: &AppState) {
+pub fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     let body_area = match state.sync_warning.as_ref() {
         Some(warning) => {
             let chunks = Layout::default()
@@ -306,7 +313,7 @@ pub fn draw_history_browser(
     );
 }
 
-fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -318,9 +325,30 @@ fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state
         .split(area);
 
     draw_header(frame, chunks[0], state);
-    draw_scatter(frame, chunks[1], state, true);
+
+    // If a thumbnail is loaded, give the left 20 columns to the image and
+    // let the visualizer flex into the remaining space; otherwise the
+    // visualizer fills the whole row as before.
+    let (image_area, scatter_area) = if state.thumbnail.is_some() {
+        let split = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(20), Constraint::Min(20)])
+            .split(chunks[1]);
+        (Some(split[0]), split[1])
+    } else {
+        (None, chunks[1])
+    };
+
+    draw_scatter(frame, scatter_area, state, true);
     draw_progress(frame, chunks[2], state);
     draw_footer(frame, chunks[3]);
+
+    // Render the stateful image last so its mutable borrow of state.thumbnail
+    // doesn't conflict with the immutable borrows above.
+    if let (Some(area), Some(thumb)) = (image_area, state.thumbnail.as_mut()) {
+        let widget = StatefulImage::default();
+        frame.render_stateful_widget(widget, area, thumb);
+    }
 }
 
 fn draw_fullscreen_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {

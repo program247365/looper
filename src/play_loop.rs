@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ratatui_image::picker::Picker;
+
 use crate::audio::AudioPlayer;
 use crate::download::{DownloadEvent, LoadingPhase};
 use crate::media_controls::MediaSessionHandle;
@@ -35,14 +37,14 @@ pub struct PlaybackContext<'a> {
 }
 
 pub fn browse_history(ctx: PlaybackContext) -> Result<()> {
-    run_terminal_session(|terminal, title_state| {
-        browse_history_session(terminal, title_state, &ctx)
+    run_terminal_session(|terminal, title_state, picker| {
+        browse_history_session(terminal, title_state, &ctx, picker)
     })
 }
 
 pub fn play_file(url: &str, ctx: PlaybackContext) -> Result<()> {
-    run_terminal_session(|terminal, title_state| {
-        play_file_session(terminal, title_state, url, &ctx)
+    run_terminal_session(|terminal, title_state, picker| {
+        play_file_session(terminal, title_state, url, &ctx, picker)
     })
 }
 
@@ -51,12 +53,13 @@ where
     F: FnOnce(
         &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
         &mut TitleState,
+        Option<&Picker>,
     ) -> Result<()>,
 {
     #[cfg(unix)]
     reattach_stdin_to_tty()?;
 
-    let mut terminal = setup_terminal()?;
+    let (mut terminal, picker) = setup_terminal()?;
     let mut title_state = TitleState::new();
 
     // Wrap color_eyre's panic hook so the terminal is restored before the
@@ -68,7 +71,7 @@ where
         orig_hook(info);
     }));
 
-    let result = session(&mut terminal, &mut title_state);
+    let result = session(&mut terminal, &mut title_state, picker.as_ref());
 
     let _ = title_state.reset();
     restore_terminal(&mut terminal)?;
@@ -79,6 +82,7 @@ fn browse_history_session(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     title_state: &mut TitleState,
     ctx: &PlaybackContext,
+    picker: Option<&Picker>,
 ) -> Result<()> {
     let mut startup = StartupScreenState {
         status: "db migrations... teaching SQLite to keep a beat".to_string(),
@@ -142,6 +146,7 @@ fn browse_history_session(
                                 title_state,
                                 &row.replay_target,
                                 ctx,
+                                picker,
                             );
                         }
                     }
@@ -163,6 +168,7 @@ fn play_file_session(
     title_state: &mut TitleState,
     initial_url: &str,
     ctx: &PlaybackContext,
+    picker: Option<&Picker>,
 ) -> Result<()> {
     let mut current_url = initial_url.to_string();
     let mut startup = StartupScreenState {
@@ -196,12 +202,12 @@ fn play_file_session(
                     source_url: None,
                     pending_download: None,
                     service: None,
-                    thumbnail_url: None,
                     thumbnail_path: None,
                 }],
                 false,
                 ctx,
                 sync_warning.as_ref(),
+                picker,
             )?,
             Some(tracks) => {
                 let is_playlist = tracks.len() > 1;
@@ -214,6 +220,7 @@ fn play_file_session(
                     is_playlist,
                     ctx,
                     sync_warning.as_ref(),
+                    picker,
                 )?
             }
         };
@@ -709,6 +716,7 @@ fn play_tracks(
     is_playlist: bool,
     ctx: &PlaybackContext,
     sync_warning: Option<&SyncWarning>,
+    picker: Option<&Picker>,
 ) -> Result<Option<String>> {
     if is_playlist {
         loop_playlist(
@@ -719,6 +727,7 @@ fn play_tracks(
             title_state,
             ctx,
             sync_warning,
+            picker,
         )
     } else {
         match play_single_track(
@@ -731,6 +740,7 @@ fn play_tracks(
             title_state,
             ctx,
             sync_warning,
+            picker,
         )? {
             LoopAction::Quit => Ok(None),
             LoopAction::NextTrack | LoopAction::PreviousTrack => Ok(None),
@@ -747,6 +757,7 @@ fn loop_playlist(
     title_state: &mut TitleState,
     ctx: &PlaybackContext,
     sync_warning: Option<&SyncWarning>,
+    picker: Option<&Picker>,
 ) -> Result<Option<String>> {
     let mut tracks = initial_tracks;
     loop {
@@ -775,6 +786,7 @@ fn loop_playlist(
                 title_state,
                 ctx,
                 sync_warning,
+                picker,
             )? {
                 LoopAction::Quit => return Ok(None),
                 LoopAction::NextTrack => idx += 1,
@@ -792,6 +804,18 @@ fn loop_playlist(
     }
 }
 
+/// Open and decode a thumbnail image into a ratatui-image stateful protocol.
+/// Returns None if any step fails — the renderer treats that as "no image."
+fn decode_thumbnail(
+    picker: Option<&Picker>,
+    path: Option<&Path>,
+) -> Option<ratatui_image::protocol::StatefulProtocol> {
+    let picker = picker?;
+    let path = path?;
+    let dyn_img = image::ImageReader::open(path).ok()?.decode().ok()?;
+    Some(picker.new_resize_protocol(dyn_img))
+}
+
 fn play_single_track(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     mut track: TrackInfo,
@@ -802,6 +826,7 @@ fn play_single_track(
     title_state: &mut TitleState,
     ctx: &PlaybackContext,
     sync_warning: Option<&SyncWarning>,
+    picker: Option<&Picker>,
 ) -> Result<LoopAction> {
     if prepare_track_for_playback(
         terminal,
@@ -846,6 +871,8 @@ fn play_single_track(
     }
     let is_favorite = storage.lock().unwrap().favorite_for(&record.track_key)?;
 
+    let thumbnail = decode_thumbnail(picker, track.thumbnail_path.as_deref());
+
     let mut state = AppState {
         filename: track.title.clone(),
         service: track.service.clone(),
@@ -868,6 +895,7 @@ fn play_single_track(
         cache_status: None,
         history_panel: None,
         sync_warning: sync_warning.cloned(),
+        thumbnail,
     };
 
     if let Some(media) = &ctx.media {
@@ -999,10 +1027,13 @@ fn prepare_track_for_playback(
     let cache_dir = plugin::cache_dir_path()?;
     let (sender, receiver) = mpsc::channel();
     let source_url = pending.source_url.clone();
+    let cache_dir_for_dl = cache_dir.clone();
     thread::spawn(move || {
-        if let Err(err) =
-            ytdlp::download_track_with_progress(&source_url, &cache_dir, Some(sender.clone()))
-        {
+        if let Err(err) = ytdlp::download_track_with_progress(
+            &source_url,
+            &cache_dir_for_dl,
+            Some(sender.clone()),
+        ) {
             let _ = sender.send(DownloadEvent::Error(err.to_string()));
         }
     });
@@ -1040,6 +1071,9 @@ fn prepare_track_for_playback(
                     note = "teaching ffmpeg some manners before showtime".to_string();
                 }
                 DownloadEvent::Ready(path) => {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        track.thumbnail_path = ytdlp::thumbnail_for(&cache_dir, stem);
+                    }
                     track.playback = PlaybackInput::file(path);
                     track.pending_download = None;
                     return Ok(false);
@@ -1303,6 +1337,7 @@ mod tests {
             cache_status: None,
             history_panel: None,
             sync_warning: None,
+            thumbnail: None,
         }
     }
 
