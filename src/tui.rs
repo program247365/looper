@@ -337,15 +337,35 @@ fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state
 
     draw_header(frame, chunks[0], state);
 
-    // If a thumbnail is loaded, give the left 20 columns to the image and
-    // let the visualizer flex into the remaining space; otherwise the
-    // visualizer fills the whole row as before.
+    // If a thumbnail is loaded, dedicate a 34-column gutter on the left to
+    // it and let the visualizer flex into the remaining space. The image
+    // itself is 32x9 char cells (16:9 in halfblock pixels — exact aspect
+    // match for typical YouTube/SoundCloud thumbnails), vertically centered
+    // in the gutter with 1-char horizontal margins. Negative space above
+    // and below is intentional: it makes the image read as an anchor rather
+    // than a corner sticker.
     let (image_area, scatter_area) = if state.thumbnail.is_some() {
-        let split = Layout::default()
+        let outer = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(20), Constraint::Min(20)])
+            .constraints([Constraint::Length(34), Constraint::Min(20)])
             .split(chunks[1]);
-        (Some(split[0]), split[1])
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(9),
+                Constraint::Min(0),
+            ])
+            .split(outer[0]);
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(32),
+                Constraint::Length(1),
+            ])
+            .split(vertical[1]);
+        (Some(horizontal[1]), outer[1])
     } else {
         (None, chunks[1])
     };
