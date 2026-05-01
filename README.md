@@ -28,7 +28,7 @@ It supports:
 
 ## Install
 
-### Homebrew
+### Homebrew (Apple Silicon)
 
 Fresh install:
 
@@ -44,6 +44,10 @@ brew update
 brew upgrade program247365/tap/looper
 ```
 
+The Homebrew formula ships a prebuilt binary for `aarch64-apple-darwin`, so install and upgrade are a small download and a file move — no compile step on your machine. `ffmpeg` and `yt-dlp` are pulled in automatically as runtime dependencies.
+
+Intel macOS users: there is no prebuilt binary. See "Build from source" below or use `brew install --HEAD program247365/tap/looper` to compile from `main`.
+
 ### Build from source
 
 ```shell
@@ -54,14 +58,7 @@ make install
 
 Requires Rust. Install via [rustup](https://rustup.rs) if needed.
 
-### External tools for online playback
-
-Remote URL playback depends on:
-
-- `yt-dlp`
-- `ffmpeg`
-
-Install them with Homebrew:
+For remote URL playback (YouTube, SoundCloud, HypeM), also install `yt-dlp` and `ffmpeg`:
 
 ```shell
 brew install yt-dlp ffmpeg
@@ -293,6 +290,24 @@ cargo test
 ## Releasing
 
 ```shell
-make release-patch
-make release-minor
+make release-patch    # bump patch version (0.5.x → 0.5.x+1) and release
+make release-minor    # bump minor version (0.5.x → 0.6.0) and release
+make smoke-test       # (optional) verify the published formula installs cleanly
 ```
+
+`make release-patch` / `make release-minor` runs end-to-end:
+
+1. Bumps the version in `Cargo.toml` and commits it
+2. Tags `v<version>` and pushes the tag
+3. The `Release` GitHub Actions workflow (`.github/workflows/release.yml`) fires on the tag, builds an `aarch64-apple-darwin` binary on a `macos-14` runner, and attaches it to the GitHub release
+4. `make bump-formula` (auto-invoked) polls the release, computes the SHA256, regenerates the Homebrew formula via `scripts/render-formula.sh`, and pushes the update to [`program247365/homebrew-tap`](https://github.com/program247365/homebrew-tap)
+
+Total wall-clock time is typically 3–4 minutes (most of it the arm64 cargo build on CI).
+
+`make smoke-test` then reinstalls the formula on your machine and asserts:
+
+- the formula uses the prebuilt-binary install path (`bin.install "looper"`)
+- the tap version matches `Cargo.toml`
+- `looper --help` runs successfully
+
+If you need to recover from a partial release (e.g. CI flaked between tag push and formula update), re-run `make bump-formula` directly — it is idempotent and will wait for the asset, then push to the tap.
