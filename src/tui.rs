@@ -99,11 +99,11 @@ pub fn draw(frame: &mut ratatui::Frame, state: &AppState) {
                     Constraint::Length(SYNC_WARNING_HEIGHT),
                     Constraint::Min(0),
                 ])
-                .split(frame.size());
+                .split(frame.area());
             draw_sync_warning(frame, chunks[0], warning);
             chunks[1]
         }
-        None => frame.size(),
+        None => frame.area(),
     };
 
     if state.fullscreen {
@@ -171,11 +171,11 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
                     Constraint::Length(SYNC_WARNING_HEIGHT),
                     Constraint::Min(0),
                 ])
-                .split(frame.size());
+                .split(frame.area());
             draw_sync_warning(frame, split[0], warning);
             split[1]
         }
-        None => frame.size(),
+        None => frame.area(),
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -248,11 +248,11 @@ pub fn draw_history_browser(
                     Constraint::Length(SYNC_WARNING_HEIGHT),
                     Constraint::Min(0),
                 ])
-                .split(frame.size());
+                .split(frame.area());
             draw_sync_warning(frame, split[0], warning);
             split[1]
         }
-        None => frame.size(),
+        None => frame.area(),
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -812,7 +812,7 @@ fn favorite_badge(is_favorite: bool) -> Span<'static> {
 }
 
 fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &HistoryPanelState) {
-    let area = centered_rect(88, 72, frame.size());
+    let area = centered_rect(88, 72, frame.area());
     frame.render_widget(Clear, area);
     draw_history_table(
         frame,
@@ -850,7 +850,7 @@ fn draw_history_table(
         panel.sort_field.label(),
         if panel.descending { "↓" } else { "↑" }
     );
-    let controls = if area == frame.size() {
+    let controls = if area == frame.area() {
         "  •  j/k move  h/l sort  r reverse  s star  enter replay  q quit"
     } else {
         "  •  j/k move  h/l sort  r reverse  s star  enter replay  p/esc close"
@@ -924,7 +924,7 @@ fn draw_history_table(
             .header(header_row)
             .column_spacing(2)
             .style(Style::default().fg(Color::Rgb(210, 210, 220)))
-            .highlight_style(
+            .row_highlight_style(
                 Style::default()
                     .bg(Color::Rgb(45, 45, 65))
                     .fg(Color::White)
