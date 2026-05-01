@@ -153,39 +153,35 @@ release: ## Tag, push, wait for CI binaries, then update Homebrew tap
 	@echo "Tag pushed. CI will build binaries and create the GitHub release."
 	$(MAKE) bump-formula
 
-wait-for-release-assets: ## Wait until both arch tarballs are attached to the GH release
-	@echo "Waiting for v$(VERSION) release assets (arm64 + x86_64)..."
+wait-for-release-assets: ## Wait until the arm64 tarball is attached to the GH release
+	@echo "Waiting for v$(VERSION) arm64 release asset..."
 	@for i in $$(seq 1 90); do \
 		ASSETS=$$(gh release view v$(VERSION) --repo program247365/looper --json assets --jq '.assets[].name' 2>/dev/null || true); \
 		ARM=$$(echo "$$ASSETS" | grep -c "looper-aarch64-apple-darwin.tar.gz" || true); \
-		X86=$$(echo "$$ASSETS" | grep -c "looper-x86_64-apple-darwin.tar.gz" || true); \
-		if [ "$$ARM" = "1" ] && [ "$$X86" = "1" ]; then \
-			echo "Both assets present."; \
+		if [ "$$ARM" = "1" ]; then \
+			echo "arm64 asset present."; \
 			exit 0; \
 		fi; \
-		printf "  (%02d/90) waiting... arm64=%s x86_64=%s\n" "$$i" "$$ARM" "$$X86"; \
+		printf "  (%02d/90) waiting... arm64=%s\n" "$$i" "$$ARM"; \
 		sleep 10; \
 	done; \
-	echo "Timed out waiting for release assets. Check: gh run list --repo program247365/looper"; \
+	echo "Timed out waiting for release asset. Check: gh run list --repo program247365/looper"; \
 	exit 1
 
-bump-formula: wait-for-release-assets ## Update tap formula with prebuilt binary URLs + SHA256s
+bump-formula: wait-for-release-assets ## Update tap formula with prebuilt arm64 URL + SHA256
 	@set -e; \
 	  ARM_URL="https://github.com/program247365/looper/releases/download/v$(VERSION)/looper-aarch64-apple-darwin.tar.gz"; \
-	  X86_URL="https://github.com/program247365/looper/releases/download/v$(VERSION)/looper-x86_64-apple-darwin.tar.gz"; \
-	  echo "Computing SHA256s..."; \
+	  echo "Computing SHA256..."; \
 	  ARM_SHA=$$(curl -fsSL "$$ARM_URL" | shasum -a 256 | awk '{print $$1}'); \
-	  X86_SHA=$$(curl -fsSL "$$X86_URL" | shasum -a 256 | awk '{print $$1}'); \
-	  echo "  arm64:  $$ARM_SHA"; \
-	  echo "  x86_64: $$X86_SHA"; \
+	  echo "  arm64: $$ARM_SHA"; \
 	  rm -rf $(TAP_DIR); \
 	  git clone $(TAP_REPO) $(TAP_DIR); \
-	  bash scripts/render-formula.sh "$(VERSION)" "$$ARM_SHA" "$$X86_SHA" > $(TAP_DIR)/Formula/looper.rb; \
+	  bash scripts/render-formula.sh "$(VERSION)" "$$ARM_SHA" > $(TAP_DIR)/Formula/looper.rb; \
 	  cd $(TAP_DIR) && git add Formula/looper.rb && \
 	    git commit -m "Update looper to v$(VERSION)" && \
 	    git push origin main; \
 	  rm -rf $(TAP_DIR); \
-	  echo "Done. Users now get a prebuilt binary on 'brew upgrade looper'."
+	  echo "Done. Apple Silicon users get a prebuilt binary on 'brew upgrade looper'."
 
 smoke-test: ## Verify the published formula installs the prebuilt binary cleanly
 	@echo "Smoke-testing prebuilt install for v$(VERSION)..."

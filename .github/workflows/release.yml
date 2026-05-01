@@ -18,38 +18,30 @@ jobs:
           generate_release_notes: true
 
   build:
-    name: Build ${{ matrix.target }}
+    name: Build aarch64-apple-darwin
     needs: create-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-14
-          - target: x86_64-apple-darwin
-            os: macos-13
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: aarch64-apple-darwin
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target aarch64-apple-darwin
 
       - name: Package binary
         run: |
           mkdir -p dist
-          tar -czf "dist/looper-${{ matrix.target }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" looper
+          tar -czf "dist/looper-aarch64-apple-darwin.tar.gz" \
+            -C "target/aarch64-apple-darwin/release" looper
 
       - name: Upload artifact to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/looper-${{ matrix.target }}.tar.gz
+          files: dist/looper-aarch64-apple-darwin.tar.gz

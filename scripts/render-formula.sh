@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Render the Homebrew formula for looper with prebuilt-binary URLs and SHA256s.
-# Usage: render-formula.sh <version> <arm64-sha256> <x86_64-sha256>
+# Render the Homebrew formula for looper with the prebuilt arm64-macOS binary.
+# Usage: render-formula.sh <version> <arm64-sha256>
 
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 <version> <arm64-sha256> <x86_64-sha256>" >&2
+if [[ $# -ne 2 ]]; then
+  echo "usage: $0 <version> <arm64-sha256>" >&2
   exit 2
 fi
 
 VERSION="$1"
 ARM_SHA="$2"
-X86_SHA="$3"
 
 cat <<EOF
 class Looper < Formula
@@ -24,10 +23,6 @@ class Looper < Formula
     on_arm do
       url "https://github.com/program247365/looper/releases/download/v${VERSION}/looper-aarch64-apple-darwin.tar.gz"
       sha256 "${ARM_SHA}"
-    end
-    on_intel do
-      url "https://github.com/program247365/looper/releases/download/v${VERSION}/looper-x86_64-apple-darwin.tar.gz"
-      sha256 "${X86_SHA}"
     end
   end
 
