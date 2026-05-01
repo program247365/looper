@@ -267,7 +267,7 @@ fn run_loop(
     const RENDER_FPS: u64 = 30; // Target 30 FPS max
     let render_interval = Duration::from_millis(1000 / RENDER_FPS);
     let mut last_render = Instant::now();
-    let mut needs_render = true; // Force first render
+    let mut needs_render: bool;
 
     loop {
         // Update visualizer data (but don't render yet)
@@ -338,7 +338,6 @@ fn run_loop(
             ))?;
             terminal.draw(|f| draw(f, state))?;
             last_render = Instant::now();
-            needs_render = false;
         }
     }
 }
