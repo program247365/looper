@@ -136,14 +136,33 @@ impl Storage {
         let new_path = resolve_db_path()?;
         let old_path = default_db_path()?;
 
-        let storage = Self::open_and_migrate_at(new_path.clone())?;
+        // Try the resolved path (iCloud / configured folder / default).
+        // If access is denied — common on a fresh macOS machine where the terminal
+        // hasn't been granted Full Disk Access — fall back to the local default and
+        // print a one-time actionable message so the user knows how to fix it.
+        let storage = match Self::open_and_migrate_at(new_path.clone()) {
+            Ok(s) => s,
+            Err(err) if new_path != old_path => {
+                eprintln!(
+                    "looper: cannot open sync database at {path}\n  \
+                     Reason: {err}\n  \
+                     Fix:    System Settings → Privacy & Security → Full Disk Access → \
+                     enable your terminal app (Terminal, iTerm2, etc.)\n  \
+                     Falling back to local database until then.",
+                    path = new_path.display(),
+                );
+                Self::open_and_migrate_at(old_path.clone())?
+            }
+            Err(err) => return Err(err),
+        };
 
         // Auto-merge: on first run after upgrade, if the old local DB exists at a
         // different path (e.g. we just moved to iCloud), merge it in and archive it.
         // The rename to .bak makes this idempotent — subsequent launches skip it.
-        if old_path != new_path && old_path.exists() {
+        let effective_path = &storage.db_path;
+        if old_path != *effective_path && old_path.exists() {
             let computer = computer_name();
-            if let Err(err) = merge_old_db_into(&new_path, &old_path, &computer) {
+            if let Err(err) = merge_old_db_into(effective_path, &old_path, &computer) {
                 eprintln!("looper: warning — could not merge old history: {err}");
             } else {
                 let bak = old_path.with_extension("sqlite3.bak");
