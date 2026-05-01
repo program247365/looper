@@ -135,17 +135,103 @@ Remote tracks are cached locally after download:
 | macOS | `~/Library/Caches/sh.kbr.looper/` |
 | Linux | `~/.cache/looper/` |
 
-Playback history and favorites live in a SQLite database:
+Playback history and favorites live in a SQLite database (`looper.sqlite3`). Where it lives depends on your sync setup — see [Cross-Device Sync](#cross-device-sync) below.
 
-| Platform | Database path |
-|----------|---------------|
-| macOS | `~/Library/Application Support/sh.kbr.looper/looper.sqlite3` |
-| Linux | `~/.local/share/looper/looper.sqlite3` |
-
-- startup applies pending embedded migrations automatically
+- startup applies pending embedded migrations automatically — no manual steps needed when upgrading
 - bare `looper` loads this history first and lets you replay from it
 - history is tracked per playable URL or canonical local file path
-- each track stores title, platform, favorite state, last played timestamp, play count, and cumulative time played
+- each track stores title, platform, favorite state, last played timestamp, play count, cumulative time played, and which computer played it last
+
+## Cross-Device Sync
+
+looper keeps history in sync across your computers by storing `looper.sqlite3` in a shared folder (iCloud Drive, Dropbox, or any folder you choose). No account, no server — just a file in a folder you already sync.
+
+### How it picks where to store the database
+
+On every launch, looper resolves the database location in this order:
+
+1. **Configured sync folder** — if you've run `looper config set sync-folder`, that path wins
+2. **iCloud Drive (macOS only)** — if iCloud Drive is active, looper automatically uses `~/Library/Mobile Documents/com~apple~CloudDocs/looper/looper.sqlite3`
+3. **Platform default** — fallback when neither of the above applies
+
+| Platform | Default database path |
+|----------|-----------------------|
+| macOS (no iCloud) | `~/Library/Application Support/sh.kbr.looper/looper.sqlite3` |
+| Linux | `~/.local/share/looper/looper.sqlite3` |
+
+### iCloud Drive (zero config on macOS)
+
+If you use iCloud Drive, nothing extra is needed. On first launch after installing (or upgrading to) this version, looper:
+
+1. Detects iCloud Drive is active
+2. Creates `~/Library/Mobile Documents/com~apple~CloudDocs/looper/looper.sqlite3`
+3. Merges any existing local history into the iCloud database automatically
+4. Archives the old local database to `.sqlite3.bak` so it's never run twice
+
+Once the iCloud file syncs to your other Macs (usually within a minute), every machine shares the same history. No commands needed.
+
+**Verify it's working:**
+
+```shell
+looper config show
+# sync_folder = (auto — iCloud Drive if available, otherwise platform default)
+
+ls ~/Library/Mobile\ Documents/com~apple~CloudDocs/looper/
+# looper.sqlite3
+```
+
+### Dropbox, OneDrive, or any synced folder
+
+Point looper at any folder your cloud provider keeps in sync:
+
+```shell
+looper config set sync-folder ~/Dropbox/looper
+# Sync folder set to: /Users/you/Dropbox/looper
+# looper will use this folder for looper.sqlite3 on next launch.
+```
+
+Run this once on each computer. On the next launch, looper moves (with merge) to that folder.
+
+**Verify it's working:**
+
+```shell
+looper config show
+# sync_folder = /Users/you/Dropbox/looper
+
+ls ~/Dropbox/looper/
+# looper.sqlite3
+```
+
+### Check current config at any time
+
+```shell
+looper config show
+```
+
+### Two-computer upgrade scenario
+
+If both computers already have local history from an older version of looper:
+
+1. **Computer A** upgrades → detects iCloud (or configured folder) → merges its old local history in → archives old file
+2. iCloud syncs to Computer B (the database now has A's history)
+3. **Computer B** upgrades → opens the iCloud file (already has A's data) → merges its own old local history in
+
+Result: the shared database has all plays from both computers, tagged with the machine that played each track. No data is lost.
+
+### Merge rules (when two histories combine)
+
+| Field | Result |
+|-------|--------|
+| Play count | Sum of both |
+| Time played | Sum of both |
+| First played | Earliest of both |
+| Last played | Latest of both |
+| Favorite | `true` if either copy is favorited |
+| Last played on | Computer with the more recent play |
+
+### A note on concurrent access
+
+looper enables WAL mode on the database, which makes it safe for one machine to read while another writes. Playing on two machines simultaneously and writing to the same file is unusual and could cause conflicts — for typical single-user use (one active machine at a time) this is not an issue.
 
 ## Keys
 

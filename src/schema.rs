@@ -9,5 +9,6 @@ diesel::table! {
         total_play_seconds -> BigInt,
         first_played_at -> BigInt,
         last_played_at -> BigInt,
+        last_played_computer -> Text,
     }
 }

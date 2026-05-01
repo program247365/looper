@@ -105,6 +105,29 @@ EXAMPLES:
         #[structopt(short, long)]
         url: String,
     },
+    /// Configure looper settings
+    Config {
+        #[structopt(subcommand)]
+        cmd: ConfigCmd,
+    },
+}
+
+#[derive(StructOpt, Debug)]
+enum ConfigCmd {
+    /// Set a configuration value
+    Set {
+        #[structopt(subcommand)]
+        key: ConfigKey,
+    },
+    /// Show current configuration
+    Show,
+}
+
+#[derive(StructOpt, Debug)]
+enum ConfigKey {
+    /// Set the folder where looper.sqlite3 is stored (e.g. a Dropbox or custom path).
+    /// Overrides iCloud auto-detection. Run once per machine.
+    SyncFolder { path: String },
 }
 
 fn main() -> Result<()> {
@@ -138,6 +161,7 @@ fn run_app(opt: Opt) -> Result<()> {
         };
         let result = match opt.cmd {
             Some(Command::Play { url }) => play_file(&url, ctx),
+            Some(Command::Config { cmd }) => cmd_config(cmd),
             None => browse_history(ctx),
         };
         match result {
@@ -175,8 +199,26 @@ fn run_app(opt: Opt) -> Result<()> {
     };
     match opt.cmd {
         Some(Command::Play { url }) => play_file(&url, ctx),
+        Some(Command::Config { cmd }) => cmd_config(cmd),
         None => browse_history(ctx),
     }
+}
+
+fn cmd_config(cmd: ConfigCmd) -> Result<()> {
+    match cmd {
+        ConfigCmd::Set { key: ConfigKey::SyncFolder { path } } => {
+            storage::write_sync_folder_config(std::path::Path::new(&path))?;
+            println!("Sync folder set to: {path}");
+            println!("looper will use this folder for looper.sqlite3 on next launch.");
+        }
+        ConfigCmd::Show => match storage::read_sync_folder_config() {
+            Some(folder) => println!("sync_folder = {}", folder.display()),
+            None => println!(
+                "sync_folder = (auto — iCloud Drive if available, otherwise platform default)"
+            ),
+        },
+    }
+    Ok(())
 }
 
 #[cfg(test)]
