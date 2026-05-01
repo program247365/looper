@@ -196,6 +196,8 @@ fn play_file_session(
                     source_url: None,
                     pending_download: None,
                     service: None,
+                    thumbnail_url: None,
+                    thumbnail_path: None,
                 }],
                 false,
                 ctx,

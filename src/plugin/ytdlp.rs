@@ -17,6 +17,7 @@ pub struct MetadataEntry {
     pub title: String,
     pub duration_secs: Option<f64>,
     pub webpage_url: String,
+    pub thumbnail_url: Option<String>,
 }
 
 pub fn check_installed() -> Result<()> {
@@ -49,6 +50,7 @@ pub fn resolve_url(url: &str, cache_dir: &Path, service: &str) -> Result<Vec<Tra
                     source_url: track.webpage_url.clone(),
                 })
             };
+            let thumbnail_path = thumbnail_for(cache_dir, &track.id);
             Ok(TrackInfo {
                 title: track.title,
                 duration_secs: track.duration_secs,
@@ -56,6 +58,8 @@ pub fn resolve_url(url: &str, cache_dir: &Path, service: &str) -> Result<Vec<Tra
                 source_url: Some(track.webpage_url),
                 pending_download,
                 service: Some(service.to_string()),
+                thumbnail_url: track.thumbnail_url,
+                thumbnail_path,
             })
         })
         .collect()
@@ -79,6 +83,8 @@ pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
                 source_url: Some(entry.webpage_url),
                 pending_download: None,
                 service: Some(service),
+                thumbnail_url: entry.thumbnail_url,
+                thumbnail_path: None,
             })
         })
         .collect()
@@ -138,6 +144,18 @@ pub fn download_track(url: &str, cache_dir: &Path) -> Result<PathBuf> {
     download_track_with_progress(url, cache_dir, None)
 }
 
+/// Look for a thumbnail file written by `yt-dlp --write-thumbnail` for `id`.
+/// Probes the four extensions yt-dlp commonly emits.
+pub fn thumbnail_for(cache_dir: &Path, id: &str) -> Option<PathBuf> {
+    for ext in &["jpg", "jpeg", "png", "webp"] {
+        let candidate = cache_dir.join(format!("{id}.{ext}"));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 pub fn download_track_with_progress(
     url: &str,
     cache_dir: &Path,
@@ -152,6 +170,9 @@ pub fn download_track_with_progress(
         .arg("--no-playlist")
         .arg("--no-warnings")
         .arg("--newline")
+        .arg("--write-thumbnail")
+        .arg("--convert-thumbnails")
+        .arg("jpg")
         .arg("--progress-template")
         .arg("download:LOOPER_PROGRESS\t%(progress.downloaded_bytes)s\t%(progress.total_bytes)s\t%(progress.total_bytes_estimate)s\t%(progress.speed)s\t%(progress.eta)s")
         .arg("-o")
@@ -277,11 +298,14 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
         })
         .unwrap_or_else(|| fallback_url.to_string());
 
+    let thumbnail_url = first_str(&value, &["thumbnail"]).map(str::to_string);
+
     Ok(MetadataEntry {
         id,
         title,
         duration_secs,
         webpage_url,
+        thumbnail_url,
     })
 }
 
