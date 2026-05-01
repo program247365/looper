@@ -1,15 +1,19 @@
 use color_eyre::eyre::Result;
+use std::sync::mpsc;
 use structopt::StructOpt;
 
 mod audio;
 mod download;
+#[cfg(target_os = "macos")]
+mod macos_runloop;
+mod media_controls;
 mod play_loop;
 mod playback_input;
 mod plugin;
 mod schema;
 mod storage;
 mod tui;
-use play_loop::{browse_history, play_file};
+use play_loop::{browse_history, play_file, PlaybackContext};
 
 /// A CLI audio looper with a TUI visualizer — play local files, YouTube,
 /// SoundCloud, or HypeM tracks and playlists on repeat so you can stay in the zone.
@@ -55,9 +59,18 @@ PLAYBACK BEHAVIOR:
 TUI CONTROLS:
     q / Ctrl-C     Quit
     Space          Pause / resume
+    n              Next track (playlist mode)
+    b              Previous track (playlist mode)
     f              Toggle fullscreen visualizer
     s              Toggle favorite
     p / Esc        Toggle history panel
+
+  macOS only — media keys (works while TUI is in the background):
+    Play/Pause     Toggle pause
+    Next           Skip to next track in playlist
+    Previous       Skip to previous track in playlist
+    Track info also appears in the system Now Playing widget
+    (Control Center, lock screen, AirPods controls).
 
   History panel:
     j / k          Navigate up / down
@@ -98,9 +111,71 @@ fn main() -> Result<()> {
     color_eyre::install()?;
     let opt = Opt::from_args();
 
+    run_app(opt)
+}
+
+#[cfg(target_os = "macos")]
+fn run_app(opt: Opt) -> Result<()> {
+    // On macOS, MPRemoteCommandCenter callbacks dispatch from the main thread's
+    // AppKit run loop. Create the media session here, then move the TUI work
+    // onto a worker thread. The main thread runs NSApp.run() until the worker
+    // exits the process.
+    let (session, cmd_rx) = match media_controls::MediaSession::start() {
+        Ok((s, rx)) => (Some(s), rx),
+        Err(err) => {
+            eprintln!("looper: media controls unavailable: {err}");
+            (None, mpsc::channel::<play_loop::KeyCommand>().1)
+        }
+    };
+    let media_handle = session.as_ref().map(|s| s.handle());
+    // Keep the session alive for the lifetime of the process.
+    let _session = session;
+
+    macos_runloop::run_with_tui_thread(move || {
+        let ctx = PlaybackContext {
+            cmd_rx: &cmd_rx,
+            media: media_handle.clone(),
+        };
+        let result = match opt.cmd {
+            Some(Command::Play { url }) => play_file(&url, ctx),
+            None => browse_history(ctx),
+        };
+        match result {
+            Ok(()) => 0,
+            Err(err) => {
+                eprintln!("{err:?}");
+                1
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_app(opt: Opt) -> Result<()> {
+    // Linux: souvlaki spawns its own DBus thread; the main thread stays free
+    // for the TUI. Windows: deferred (would need a hidden HWND + message pump).
+    #[cfg(target_os = "linux")]
+    let (session, cmd_rx) = match media_controls::MediaSession::start() {
+        Ok((s, rx)) => (Some(s), rx),
+        Err(err) => {
+            eprintln!("looper: media controls unavailable: {err}");
+            (None, mpsc::channel::<play_loop::KeyCommand>().1)
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (session, cmd_rx): (Option<media_controls::MediaSession>, _) =
+        (None, mpsc::channel::<play_loop::KeyCommand>().1);
+
+    let media_handle = session.as_ref().map(|s| s.handle());
+    let _session = session;
+
+    let ctx = PlaybackContext {
+        cmd_rx: &cmd_rx,
+        media: media_handle,
+    };
     match opt.cmd {
-        Some(Command::Play { url }) => play_file(&url),
-        None => browse_history(),
+        Some(Command::Play { url }) => play_file(&url, ctx),
+        None => browse_history(ctx),
     }
 }
 

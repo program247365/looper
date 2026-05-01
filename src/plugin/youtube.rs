@@ -26,28 +26,52 @@ fn normalize_youtube_url(url: &str) -> String {
         return url.to_string();
     }
 
-    let (base, fragment) = match url.split_once('#') {
-        Some((before, after)) => (before, Some(after)),
-        None => (url, None),
+    let base = match url.split_once('#') {
+        Some((before, _)) => before,
+        None => url,
     };
-    let (path, query) = match base.split_once('?') {
-        Some(parts) => parts,
+    let query = match base.split_once('?') {
+        Some((_, q)) => q,
         None => return url.to_string(),
     };
 
-    let kept: Vec<&str> = query
+    let list_param = query
         .split('&')
-        .filter(|part| part.starts_with("v="))
-        .collect();
+        .find(|part| part.starts_with("list="));
 
-    if kept.is_empty() {
-        return url.to_string();
+    match list_param {
+        Some(list) => format!("https://www.youtube.com/playlist?{list}"),
+        None => url.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_youtube_url;
+
+    #[test]
+    fn watch_with_list_becomes_playlist() {
+        let got = normalize_youtube_url("https://www.youtube.com/watch?v=abc&list=PLxyz");
+        assert_eq!(got, "https://www.youtube.com/playlist?list=PLxyz");
     }
 
-    let mut normalized = format!("{path}?{}", kept.join("&"));
-    if let Some(fragment) = fragment {
-        normalized.push('#');
-        normalized.push_str(fragment);
+    #[test]
+    fn watch_without_list_is_unchanged() {
+        let url = "https://www.youtube.com/watch?v=abc";
+        assert_eq!(normalize_youtube_url(url), url);
     }
-    normalized
+
+    #[test]
+    fn playlist_url_is_unchanged() {
+        let url = "https://www.youtube.com/playlist?list=PLxyz";
+        assert_eq!(normalize_youtube_url(url), url);
+    }
+
+    #[test]
+    fn extra_params_are_dropped_in_favor_of_list() {
+        let got = normalize_youtube_url(
+            "https://www.youtube.com/watch?v=abc&list=PLxyz&index=3&t=42s",
+        );
+        assert_eq!(got, "https://www.youtube.com/playlist?list=PLxyz");
+    }
 }

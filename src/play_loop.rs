@@ -20,6 +20,7 @@ use std::{
 
 use crate::audio::AudioPlayer;
 use crate::download::{DownloadEvent, LoadingPhase};
+use crate::media_controls::MediaSessionHandle;
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, ytdlp, TrackInfo};
 use crate::storage::{track_record, HistorySortField, SharedStorage, Storage};
@@ -28,12 +29,21 @@ use crate::tui::{
     HistoryPanelState, StartupScreenState, N_BANDS,
 };
 
-pub fn browse_history() -> Result<()> {
-    run_terminal_session(|terminal, title_state| browse_history_session(terminal, title_state))
+pub struct PlaybackContext<'a> {
+    pub cmd_rx: &'a Receiver<KeyCommand>,
+    pub media: Option<MediaSessionHandle>,
 }
 
-pub fn play_file(url: &str) -> Result<()> {
-    run_terminal_session(|terminal, title_state| play_file_session(terminal, title_state, url))
+pub fn browse_history(ctx: PlaybackContext) -> Result<()> {
+    run_terminal_session(|terminal, title_state| {
+        browse_history_session(terminal, title_state, &ctx)
+    })
+}
+
+pub fn play_file(url: &str, ctx: PlaybackContext) -> Result<()> {
+    run_terminal_session(|terminal, title_state| {
+        play_file_session(terminal, title_state, url, &ctx)
+    })
 }
 
 fn run_terminal_session<F>(session: F) -> Result<()>
@@ -68,6 +78,7 @@ where
 fn browse_history_session(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     title_state: &mut TitleState,
+    ctx: &PlaybackContext,
 ) -> Result<()> {
     let mut startup = StartupScreenState {
         status: "db migrations... teaching SQLite to keep a beat".to_string(),
@@ -123,11 +134,18 @@ fn browse_history_session(
                     }
                     KeyCommand::HistoryReplay => {
                         if let Some(row) = panel.rows.get(panel.selected) {
-                            return play_file_session(terminal, title_state, &row.replay_target);
+                            return play_file_session(
+                                terminal,
+                                title_state,
+                                &row.replay_target,
+                                ctx,
+                            );
                         }
                     }
                     KeyCommand::None
                     | KeyCommand::TogglePause
+                    | KeyCommand::NextTrack
+                    | KeyCommand::PreviousTrack
                     | KeyCommand::ToggleFullscreen
                     | KeyCommand::ToggleFavorite
                     | KeyCommand::ToggleHistory => {}
@@ -141,6 +159,7 @@ fn play_file_session(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     title_state: &mut TitleState,
     initial_url: &str,
+    ctx: &PlaybackContext,
 ) -> Result<()> {
     let mut current_url = initial_url.to_string();
     let mut startup = StartupScreenState {
@@ -173,6 +192,7 @@ fn play_file_session(
                     service: None,
                 }],
                 false,
+                ctx,
             )?,
             Some(tracks) => {
                 let is_playlist = tracks.len() > 1;
@@ -183,6 +203,7 @@ fn play_file_session(
                     Some(current_url.as_str()),
                     tracks,
                     is_playlist,
+                    ctx,
                 )?
             }
         };
@@ -197,6 +218,7 @@ fn play_file_session(
 enum LoopAction {
     Quit,
     NextTrack,
+    PreviousTrack,
     ReplayTarget(String),
 }
 
@@ -231,6 +253,7 @@ fn run_loop(
     track: &TrackInfo,
     storage: SharedStorage,
     title_state: &mut TitleState,
+    ctx: &PlaybackContext,
 ) -> Result<LoopAction> {
     // Frame rate control: only render when needed
     const RENDER_FPS: u64 = 30; // Target 30 FPS max
@@ -255,100 +278,32 @@ fn run_loop(
 
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
-                match handle_key_event(key, state) {
-                    KeyCommand::Quit => return Ok(LoopAction::Quit),
-                    KeyCommand::TogglePause => {
-                        if state.paused {
-                            state.loop_start = Instant::now() - state.pause_elapsed;
-                            player.resume();
-                        } else {
-                            state.pause_elapsed = state.loop_start.elapsed();
-                            player.pause();
-                        }
-                        state.paused = !state.paused;
-                        needs_render = true;
-                    }
-                    KeyCommand::ToggleFullscreen => {
-                        state.fullscreen = !state.fullscreen;
-                        needs_render = true;
-                    }
-                    KeyCommand::ToggleFavorite => {
-                        if let Ok(record) = track_record(track) {
-                            let favorite =
-                                storage.lock().unwrap().toggle_favorite(&record.track_key)?;
-                            state.is_favorite = favorite;
-                            if let Some(panel) = state.history_panel.as_mut() {
-                                refresh_history_panel(panel, &storage)?;
-                            }
-                        }
-                        needs_render = true;
-                    }
-                    KeyCommand::ToggleHistory => {
-                        toggle_history_panel(state, &storage)?;
-                        needs_render = true;
-                    }
-                    KeyCommand::HistoryNext => {
-                        if let Some(panel) = state.history_panel.as_mut() {
-                            if panel.selected + 1 < panel.rows.len() {
-                                panel.selected += 1;
-                                needs_render = true;
-                            }
-                        }
-                    }
-                    KeyCommand::HistoryPrev => {
-                        if let Some(panel) = state.history_panel.as_mut() {
-                            panel.selected = panel.selected.saturating_sub(1);
-                            needs_render = true;
-                        }
-                    }
-                    KeyCommand::HistorySortNext => {
-                        if let Some(panel) = state.history_panel.as_mut() {
-                            panel.sort_field = panel.sort_field.next();
-                            refresh_history_panel(panel, &storage)?;
-                            needs_render = true;
-                        }
-                    }
-                    KeyCommand::HistorySortPrev => {
-                        if let Some(panel) = state.history_panel.as_mut() {
-                            panel.sort_field = panel.sort_field.previous();
-                            refresh_history_panel(panel, &storage)?;
-                            needs_render = true;
-                        }
-                    }
-                    KeyCommand::HistoryReverse => {
-                        if let Some(panel) = state.history_panel.as_mut() {
-                            panel.descending = !panel.descending;
-                            refresh_history_panel(panel, &storage)?;
-                            needs_render = true;
-                        }
-                    }
-                    KeyCommand::HistoryReplay => {
-                        if let Some(panel) = &state.history_panel {
-                            if let Some(row) = panel.rows.get(panel.selected) {
-                                return Ok(LoopAction::ReplayTarget(row.replay_target.clone()));
-                            }
-                        }
-                    }
-                    KeyCommand::HistoryToggleFavorite => {
-                        if let Some(panel) = state.history_panel.as_mut() {
-                            if let Some(row) = panel.rows.get(panel.selected) {
-                                let selected_key = row.track_key.clone();
-                                storage.lock().unwrap().toggle_favorite(&selected_key)?;
-                                refresh_history_panel(panel, &storage)?;
-                                if let Ok(record) = track_record(track) {
-                                    if record.track_key == selected_key {
-                                        state.is_favorite = storage
-                                            .lock()
-                                            .unwrap()
-                                            .favorite_for(&record.track_key)?;
-                                    }
-                                }
-                            }
-                        }
-                        needs_render = true;
-                    }
-                    KeyCommand::None => {}
+                let cmd = handle_key_event(key, state);
+                if let Some(action) = dispatch_command(
+                    cmd,
+                    state,
+                    player,
+                    track,
+                    &storage,
+                    &mut needs_render,
+                    ctx.media.as_ref(),
+                )? {
+                    return Ok(action);
                 }
+            }
+        }
+
+        while let Ok(cmd) = ctx.cmd_rx.try_recv() {
+            if let Some(action) = dispatch_command(
+                cmd,
+                state,
+                player,
+                track,
+                &storage,
+                &mut needs_render,
+                ctx.media.as_ref(),
+            )? {
+                return Ok(action);
             }
         }
 
@@ -380,11 +335,145 @@ fn run_loop(
     }
 }
 
+fn dispatch_command(
+    cmd: KeyCommand,
+    state: &mut AppState,
+    player: &AudioPlayer,
+    track: &TrackInfo,
+    storage: &SharedStorage,
+    needs_render: &mut bool,
+    media: Option<&MediaSessionHandle>,
+) -> Result<Option<LoopAction>> {
+    match cmd {
+        KeyCommand::Quit => Ok(Some(LoopAction::Quit)),
+        KeyCommand::TogglePause => {
+            if state.paused {
+                state.loop_start = Instant::now() - state.pause_elapsed;
+                player.resume();
+            } else {
+                state.pause_elapsed = state.loop_start.elapsed();
+                player.pause();
+            }
+            state.paused = !state.paused;
+            if let Some(media) = media {
+                media.set_playback(state.paused, state.elapsed());
+            }
+            *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::NextTrack => {
+            if state.is_playlist {
+                player.skip();
+                Ok(Some(LoopAction::NextTrack))
+            } else {
+                Ok(None)
+            }
+        }
+        KeyCommand::PreviousTrack => {
+            if state.is_playlist {
+                player.skip();
+                Ok(Some(LoopAction::PreviousTrack))
+            } else {
+                Ok(None)
+            }
+        }
+        KeyCommand::ToggleFullscreen => {
+            state.fullscreen = !state.fullscreen;
+            *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::ToggleFavorite => {
+            if let Ok(record) = track_record(track) {
+                let favorite = storage.lock().unwrap().toggle_favorite(&record.track_key)?;
+                state.is_favorite = favorite;
+                if let Some(panel) = state.history_panel.as_mut() {
+                    refresh_history_panel(panel, storage)?;
+                }
+            }
+            *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::ToggleHistory => {
+            toggle_history_panel(state, storage)?;
+            *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::HistoryNext => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                if panel.selected + 1 < panel.rows.len() {
+                    panel.selected += 1;
+                    *needs_render = true;
+                }
+            }
+            Ok(None)
+        }
+        KeyCommand::HistoryPrev => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                panel.selected = panel.selected.saturating_sub(1);
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::HistorySortNext => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                panel.sort_field = panel.sort_field.next();
+                refresh_history_panel(panel, storage)?;
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::HistorySortPrev => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                panel.sort_field = panel.sort_field.previous();
+                refresh_history_panel(panel, storage)?;
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::HistoryReverse => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                panel.descending = !panel.descending;
+                refresh_history_panel(panel, storage)?;
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::HistoryReplay => {
+            if let Some(panel) = &state.history_panel {
+                if let Some(row) = panel.rows.get(panel.selected) {
+                    return Ok(Some(LoopAction::ReplayTarget(row.replay_target.clone())));
+                }
+            }
+            Ok(None)
+        }
+        KeyCommand::HistoryToggleFavorite => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                if let Some(row) = panel.rows.get(panel.selected) {
+                    let selected_key = row.track_key.clone();
+                    storage.lock().unwrap().toggle_favorite(&selected_key)?;
+                    refresh_history_panel(panel, storage)?;
+                    if let Ok(record) = track_record(track) {
+                        if record.track_key == selected_key {
+                            state.is_favorite =
+                                storage.lock().unwrap().favorite_for(&record.track_key)?;
+                        }
+                    }
+                }
+            }
+            *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::None => Ok(None),
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
-enum KeyCommand {
+pub(crate) enum KeyCommand {
     None,
     Quit,
     TogglePause,
+    NextTrack,
+    PreviousTrack,
     ToggleFullscreen,
     ToggleFavorite,
     ToggleHistory,
@@ -419,6 +508,8 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
                 KeyCommand::Quit
             }
             (KeyCode::Char(' '), _) => KeyCommand::TogglePause,
+            (KeyCode::Char('n'), _) => KeyCommand::NextTrack,
+            (KeyCode::Char('b'), _) => KeyCommand::PreviousTrack,
             (KeyCode::Char('f'), _) => KeyCommand::ToggleFullscreen,
             (KeyCode::Char('s'), _) => KeyCommand::ToggleFavorite,
             (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
@@ -607,9 +698,10 @@ fn play_tracks(
     source_url: Option<&str>,
     tracks: Vec<TrackInfo>,
     is_playlist: bool,
+    ctx: &PlaybackContext,
 ) -> Result<Option<String>> {
     if is_playlist {
-        loop_playlist(terminal, source_url, tracks, storage, title_state)
+        loop_playlist(terminal, source_url, tracks, storage, title_state, ctx)
     } else {
         match play_single_track(
             terminal,
@@ -619,9 +711,10 @@ fn play_tracks(
             false,
             storage,
             title_state,
+            ctx,
         )? {
             LoopAction::Quit => Ok(None),
-            LoopAction::NextTrack => Ok(None),
+            LoopAction::NextTrack | LoopAction::PreviousTrack => Ok(None),
             LoopAction::ReplayTarget(target) => Ok(Some(target)),
         }
     }
@@ -633,6 +726,7 @@ fn loop_playlist(
     initial_tracks: Vec<TrackInfo>,
     storage: SharedStorage,
     title_state: &mut TitleState,
+    ctx: &PlaybackContext,
 ) -> Result<Option<String>> {
     let mut tracks = initial_tracks;
     loop {
@@ -641,7 +735,8 @@ fn loop_playlist(
         let mut prefetched = HashSet::new();
         let total_tracks = shared_tracks.lock().unwrap().len();
 
-        for idx in 0..total_tracks {
+        let mut idx: usize = 0;
+        while idx < total_tracks {
             prefetch_worker.enqueue(idx, &mut prefetched);
             prefetch_worker.enqueue(idx + 1, &mut prefetched);
 
@@ -658,9 +753,11 @@ fn loop_playlist(
                 true,
                 storage.clone(),
                 title_state,
+                ctx,
             )? {
                 LoopAction::Quit => return Ok(None),
-                LoopAction::NextTrack => continue,
+                LoopAction::NextTrack => idx += 1,
+                LoopAction::PreviousTrack => idx = idx.saturating_sub(1),
                 LoopAction::ReplayTarget(target) => return Ok(Some(target)),
             }
         }
@@ -682,6 +779,7 @@ fn play_single_track(
     is_playlist: bool,
     storage: SharedStorage,
     title_state: &mut TitleState,
+    ctx: &PlaybackContext,
 ) -> Result<LoopAction> {
     if prepare_track_for_playback(
         terminal,
@@ -746,6 +844,11 @@ fn play_single_track(
         history_panel: None,
     };
 
+    if let Some(media) = &ctx.media {
+        media.set_metadata(&track);
+        media.set_playback(false, Duration::default());
+    }
+
     let result = run_loop(
         terminal,
         &mut state,
@@ -753,6 +856,7 @@ fn play_single_track(
         &track,
         storage.clone(),
         title_state,
+        ctx,
     )?;
     persist_played_time(&storage, &record.track_key, played_seconds(&state))?;
     Ok(result)

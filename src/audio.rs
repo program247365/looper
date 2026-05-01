@@ -119,6 +119,10 @@ impl AudioPlayer {
     pub fn resume(&self) {
         self.sink.play();
     }
+
+    pub fn skip(&self) {
+        self.sink.stop();
+    }
 }
 
 fn decode_input(

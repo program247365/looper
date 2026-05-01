@@ -119,3 +119,31 @@
 - Volume control (`+`/`-` keys → `sink.set_volume()`)
 - Amplitude-coupled twinkle speed (louder bands twinkle faster)
 - Beat-flash: brief brightness boost on kick drum detection
+
+## 2026-04-30: macOS media keys + system Now Playing widget
+
+### What changed
+- Added `souvlaki = "0.8"` (with `use_zbus`, no `libdbus-1-dev` needed on Linux); macOS-only deps `cocoa` + `objc` to drive `NSApplication.run()`
+- New `src/media_controls.rs` cross-platform façade: `MediaSession::start() -> (MediaSession, Receiver<KeyCommand>)`, `MediaSessionHandle::{set_metadata, set_playback}` (cheap-cloneable `Arc<Mutex<MediaControls>>`)
+- New `src/macos_runloop.rs`: spawns a `looper-tui` worker thread, runs `NSApp.run()` on the main thread (activation policy `Accessory`, no Dock icon). Worker calls `std::process::exit` on completion.
+- Refactored `play_loop.rs` to thread a `PlaybackContext { cmd_rx: &Receiver<KeyCommand>, media: Option<MediaSessionHandle> }` through `play_file → play_file_session → play_tracks → loop_playlist/play_single_track → run_loop`
+- Extracted dispatch logic from `run_loop` into a `dispatch_command` helper so keyboard events and external (media-key) events flow through one match
+- Added `KeyCommand::{NextTrack, PreviousTrack}`, `LoopAction::PreviousTrack`, `AudioPlayer::skip()` (calls `Sink::stop()`)
+- Playlist loop now uses `while idx < total_tracks` with `idx.saturating_sub(1)` for Previous (restarts track 0 if pressed there) instead of a `for` range
+- Bound `n` (Next) and `b` (Previous) keyboard shortcuts in playback mode so the playlist control surface is testable without media keys
+- Updated `--help` to document new keys + macOS media-key behavior
+- Phase 2: `set_metadata(&track)` on each track start, `set_playback(paused, elapsed)` on TogglePause — populates Control Center / lock screen / AirPods Now Playing widget
+
+### What we decided
+- Use one crate (`souvlaki`) for all three OSes rather than per-platform glue. The dep is not `#[cfg]`-gated; only the *setup code* is.
+- macOS thread-flip via `NSApp.run()` + worker `process::exit`. Considered `CFRunLoopStop`+`CFRunLoopWakeUp` and `[NSApp stop:]`+`postEvent` — both add boilerplate; `process::exit` after the worker has cleanly run terminal-restore is observably equivalent and far simpler.
+- Skip a custom NSStatusItem (menu-bar text) — the souvlaki integration already populates the system Now Playing widget which is the iTunes-equivalent on modern macOS. Custom NSStatusItem would duplicate that surface.
+- Defer Windows: would need a hidden message-only HWND + per-tick `pump_event_queue` (souvlaki ships an example). Additive change; ship later if anyone asks.
+- `use_zbus` over default `use_dbus` so Linux builds don't pull in `libdbus-1-dev` system package — better for distro packaging.
+
+### What to revisit
+- Manual smoke test on real Mac hardware: F8 (Play/Pause), F7/F9 (Prev/Next), Control Center widget, AirPods double-tap, lock screen, terminal resize during playback, q + Ctrl-C clean exit.
+- Souvlaki [issue #77](https://github.com/Sinono3/souvlaki/issues/77) (debug-build panic on macOS, open). Run release-build smoke if debug crashes.
+- Track artwork in Now Playing — yt-dlp metadata has thumbnail URLs we could pass to `MediaMetadata.cover_url`.
+- Live progress updates in the widget (currently set on track-change and pause/resume only). Could push `set_playback` once per second from the TUI tick.
+- Graceful NSApp shutdown if we ever care about Drop-running for `MediaControls` (currently sidestepped via `process::exit`).

@@ -82,9 +82,11 @@ Tap repo: https://github.com/program247365/homebrew-tap
 
 ### Main modules
 
-- `src/main.rs` — CLI entry point, installs `color-eyre`, routes `play` to `play_loop::play_file`
-- `src/play_loop.rs` — high-level orchestration for local files, remote resolution, loading UI handoff, playlists, prefetching, and the main input/render loop
+- `src/main.rs` — CLI entry point, installs `color-eyre`, builds `MediaSession` + `PlaybackContext`, routes `play` to `play_loop::play_file`. On macOS, hands the main thread to `macos_runloop::run_with_tui_thread` so AppKit can dispatch media-key callbacks.
+- `src/play_loop.rs` — high-level orchestration for local files, remote resolution, loading UI handoff, playlists, prefetching, and the main input/render loop. Owns the `KeyCommand` enum and the `PlaybackContext { cmd_rx, media }` struct shared with `main.rs`.
 - `src/audio.rs` — `AudioPlayer`, rodio sink/output setup, decoder selection, file/HTTP/process-backed input opening, shared sample tap buffer
+- `src/media_controls.rs` — cross-platform façade over `souvlaki::MediaControls`. `MediaSession::start()` returns a `(MediaSession, Receiver<KeyCommand>)`; the souvlaki callback translates `MediaControlEvent` into `KeyCommand` and forwards via the channel. `MediaSessionHandle` (cheap-cloneable, `Arc<Mutex<MediaControls>>`) exposes `set_metadata` and `set_playback` for the TUI thread to update Now Playing.
+- `src/macos_runloop.rs` — macOS-only. Spawns the TUI body on a `looper-tui` worker thread and runs `NSApp.run()` on the main thread. The worker calls `std::process::exit` on completion to terminate the run loop. Activation policy is `Accessory` so looper does not appear in the Dock.
 - `src/tui.rs` — playback TUI and loading TUI rendering
 - `src/download.rs` — loading/progress state models and helpers for formatting bytes/speed/ETA
 - `src/plugin/` — remote service resolution and `yt-dlp` integration
@@ -150,10 +152,12 @@ There are now two major UI modes:
 ### Threading model
 
 - rodio owns the audio output thread
-- the main thread owns the TUI event loop and app state
+- on Linux/Windows the main thread owns the TUI event loop and app state
+- on **macOS** the main thread is owned by `NSApp.run()`; the TUI event loop runs on a `looper-tui` worker thread (required for `MPRemoteCommandCenter` callbacks). `std::process::exit` from the worker terminates the runloop on completion.
 - the visualizer reads from `sample_buf: Arc<Mutex<VecDeque<f32>>>`
 - prefetch uses a background worker thread
 - some stream-backed audio inputs create a Tokio runtime inside `AudioPlayer`
+- media-key events from `souvlaki` arrive on the OS-specific thread (macOS: main / AppKit; Linux: souvlaki's own DBus thread) and are forwarded to the TUI thread via an `mpsc::Receiver<KeyCommand>` drained inside `run_loop`
 
 ## Notable Design Decisions
 
@@ -162,6 +166,7 @@ There are now two major UI modes:
 - per-band AGC keeps the scatter visualizer lively across different mixes
 - YouTube currently favors reliability over immediacy: cached download-first instead of direct stream-first
 - remote loading is presented in-TUI instead of as plain stderr logging
+- `souvlaki` is wired with the `use_zbus` feature so Linux builds don't need `libdbus-1-dev`; macOS uses `MPRemoteCommandCenter` + `MPNowPlayingInfoCenter` directly. Windows is intentionally unwired (would need a hidden message-only HWND + a per-tick `pump_event_queue`).
 
 ## Tests
 
