@@ -125,8 +125,11 @@ enum ConfigCmd {
 
 #[derive(StructOpt, Debug)]
 enum ConfigKey {
-    /// Set the folder where looper.sqlite3 is stored (e.g. a Dropbox or custom path).
-    /// Overrides iCloud auto-detection. Run once per machine.
+    /// Set a folder to replicate looper.sqlite3 to (e.g. iCloud Drive, Dropbox).
+    /// looper always reads and writes a fast local copy in the platform data
+    /// directory; on startup it pulls from this folder if it has newer
+    /// activity, and on quit it pushes the local copy back. By default no
+    /// replication runs. Run once per machine.
     SyncFolder { path: String },
 }
 
@@ -207,18 +210,37 @@ fn run_app(opt: Opt) -> Result<()> {
 fn cmd_config(cmd: ConfigCmd) -> Result<()> {
     match cmd {
         ConfigCmd::Set { key: ConfigKey::SyncFolder { path } } => {
-            storage::write_sync_folder_config(std::path::Path::new(&path))?;
-            println!("Sync folder set to: {path}");
-            println!("looper will use this folder for looper.sqlite3 on next launch.");
+            let folder = std::path::Path::new(&path);
+            storage::write_sync_folder_config(folder)?;
+            println!("Replication folder set to: {path}");
+            println!(
+                "looper will pull from this folder at startup and push to it on quit.\n\
+                 The live DB stays at the platform data directory."
+            );
+            if is_under_icloud_drive(folder) {
+                println!();
+                println!(
+                    "note: iCloud Drive uploads are async, so a quit on one machine isn't\n\
+                     visible on another until iCloud syncs. Running looper on two machines\n\
+                     at the same time can produce iCloud conflict copies — close one before\n\
+                     opening the other."
+                );
+            }
         }
         ConfigCmd::Show => match storage::read_sync_folder_config() {
-            Some(folder) => println!("sync_folder = {}", folder.display()),
-            None => println!(
-                "sync_folder = (auto — iCloud Drive if available, otherwise platform default)"
-            ),
+            Some(folder) => println!("sync_folder = {} (replicated on startup/quit)", folder.display()),
+            None => println!("sync_folder = (none — local DB only, no replication)"),
         },
     }
     Ok(())
+}
+
+fn is_under_icloud_drive(path: &std::path::Path) -> bool {
+    let Some(home) = directories::UserDirs::new().map(|d| d.home_dir().to_path_buf()) else {
+        return false;
+    };
+    let icloud = home.join("Library/Mobile Documents/com~apple~CloudDocs");
+    path.starts_with(&icloud)
 }
 
 #[cfg(test)]

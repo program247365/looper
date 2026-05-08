@@ -112,7 +112,10 @@ fn browse_history_session(
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
                 match handle_history_browser_key_event(key, &panel) {
-                    KeyCommand::Quit => return Ok(()),
+                    KeyCommand::Quit => {
+                        push_replica_best_effort(&storage);
+                        return Ok(());
+                    }
                     KeyCommand::HistoryNext => {
                         if panel.selected + 1 < panel.rows.len() {
                             panel.selected += 1;
@@ -227,7 +230,10 @@ fn play_file_session(
 
         match next {
             Some(replay_target) => current_url = replay_target,
-            None => return Ok(()),
+            None => {
+                push_replica_best_effort(&storage);
+                return Ok(());
+            }
         }
     }
 }
@@ -912,8 +918,19 @@ fn play_single_track(
         title_state,
         ctx,
     )?;
-    persist_played_time(&storage, &record.track_key, played_seconds(&state))?;
+    if let Err(err) = persist_played_time(&storage, &record.track_key, played_seconds(&state)) {
+        eprintln!("looper: warning — could not record final play time on quit: {err}");
+    }
     Ok(result)
+}
+
+/// Pushes the local DB to the configured replica (e.g. iCloud Drive). Best
+/// effort: any failure is logged and swallowed so quit can't fail.
+fn push_replica_best_effort(storage: &SharedStorage) {
+    let storage = storage.lock().unwrap();
+    if let Err(err) = storage.push_replica() {
+        eprintln!("looper: warning — could not replicate history on quit: {err}");
+    }
 }
 
 struct PrefetchWorker {

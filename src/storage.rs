@@ -142,42 +142,27 @@ impl From<PlayedTrackRow> for HistoryRow {
 }
 
 impl Storage {
+    /// Opens the local working DB (always at `default_db_path()`), pulling from
+    /// the configured replica first if one is set. The replica is treated as a
+    /// passive sync target — looper never reads or writes it during normal
+    /// operation. Replica failures (TCC denial, iCloud eviction, missing
+    /// network) are non-fatal: the local DB still opens and a `SyncWarning` is
+    /// surfaced for the TUI banner.
     pub fn open_and_migrate() -> Result<(Self, Option<SyncWarning>)> {
-        let new_path = resolve_db_path()?;
-        let old_path = default_db_path()?;
+        let local_path = default_db_path()?;
 
-        // Try the resolved path (iCloud / configured folder / default).
-        // If access is denied — common on a fresh macOS machine where the terminal
-        // hasn't been granted Full Disk Access — fall back to the local default and
-        // surface a SyncWarning so the TUI can display a persistent banner.
-        let (storage, sync_warning) = match Self::open_and_migrate_at(new_path.clone()) {
-            Ok(s) => (s, None),
-            Err(err) if new_path != old_path => {
-                let warning = SyncWarning {
-                    attempted_path: new_path.clone(),
+        let sync_warning = match read_replica_path() {
+            Some(replica_path) => match try_pull_from_replica(&replica_path, &local_path) {
+                Ok(_) => None,
+                Err(err) => Some(SyncWarning {
+                    attempted_path: replica_path,
                     reason: err.to_string(),
-                };
-                (Self::open_and_migrate_at(old_path.clone())?, Some(warning))
-            }
-            Err(err) => return Err(err),
+                }),
+            },
+            None => None,
         };
 
-        // Auto-merge: on first run after upgrade, if the old local DB exists at a
-        // different path (e.g. we just moved to iCloud), merge it in and archive it.
-        // The rename to .bak makes this idempotent — subsequent launches skip it.
-        let effective_path = &storage.db_path;
-        if old_path != *effective_path && old_path.exists() {
-            let computer = computer_name();
-            if let Err(err) = merge_old_db_into(effective_path, &old_path, &computer) {
-                eprintln!("looper: warning — could not merge old history: {err}");
-            } else {
-                let bak = old_path.with_extension("sqlite3.bak");
-                if let Err(err) = fs::rename(&old_path, &bak) {
-                    eprintln!("looper: warning — could not archive old DB: {err}");
-                }
-            }
-        }
-
+        let storage = Self::open_and_migrate_at(local_path)?;
         Ok((storage, sync_warning))
     }
 
@@ -197,6 +182,16 @@ impl Storage {
             .map_err(|err| eyre!("failed to run looper database migrations: {err}"))?;
 
         Ok(Self { db_path })
+    }
+
+    /// Pushes the live local DB to the configured replica. No-op when no
+    /// replica is configured. Checkpoints the WAL first so the copied file is
+    /// self-contained.
+    pub fn push_replica(&self) -> Result<()> {
+        let Some(replica_path) = read_replica_path() else {
+            return Ok(());
+        };
+        try_push_to_replica(&self.db_path, &replica_path)
     }
 
     pub fn record_play(&self, record: &TrackRecord) -> Result<()> {
@@ -398,34 +393,78 @@ pub fn track_record(track: &TrackInfo) -> Result<TrackRecord> {
     }
 }
 
-/// Resolves where the DB should live, in priority order:
-/// 1. User-configured sync folder (`~/.config/looper/sync_folder` plain-text file)
-/// 2. iCloud Drive on macOS (`~/Library/Mobile Documents/com~apple~CloudDocs/looper/`)
-/// 3. Platform data directory (existing default behavior)
-pub fn resolve_db_path() -> Result<PathBuf> {
-    if let Some(folder) = read_sync_folder_config() {
-        fs::create_dir_all(&folder).wrap_err("failed to create configured sync folder")?;
-        return Ok(folder.join("looper.sqlite3"));
-    }
-
-    #[cfg(target_os = "macos")]
-    if let Some(path) = icloud_db_path() {
-        return Ok(path);
-    }
-
-    default_db_path()
+/// Returns the configured replica DB path (sync folder + `looper.sqlite3`),
+/// if a sync folder is configured. The replica is the passive copy — looper
+/// never reads or writes it during normal operation. Pull on startup, push
+/// on shutdown.
+pub fn read_replica_path() -> Option<PathBuf> {
+    read_sync_folder_config().map(|folder| folder.join("looper.sqlite3"))
 }
 
-#[cfg(target_os = "macos")]
-fn icloud_db_path() -> Option<PathBuf> {
-    let home = directories::UserDirs::new()?.home_dir().to_path_buf();
-    let icloud_root = home.join("Library/Mobile Documents/com~apple~CloudDocs");
-    if !icloud_root.exists() {
-        return None;
+/// Pulls the replica DB into the local DB if the replica looks more recent
+/// (or the local DB is missing). "More recent" is determined by
+/// `MAX(last_played_at)` — file mtime is unreliable across iCloud sync. The
+/// pulled file replaces the local DB atomically via temp + rename. Stale
+/// WAL/SHM sidecars are removed; SQLite recreates them on next open.
+fn try_pull_from_replica(replica: &Path, local: &Path) -> Result<bool> {
+    if !replica.exists() {
+        return Ok(false);
     }
-    let looper_dir = icloud_root.join("looper");
-    fs::create_dir_all(&looper_dir).ok()?;
-    Some(looper_dir.join("looper.sqlite3"))
+    let local_max = if local.exists() {
+        db_max_last_played_at(local).unwrap_or(0)
+    } else {
+        0
+    };
+    let replica_max = db_max_last_played_at(replica)?;
+    if local.exists() && replica_max <= local_max {
+        return Ok(false);
+    }
+
+    if let Some(parent) = local.parent() {
+        fs::create_dir_all(parent).wrap_err("failed to create local data directory")?;
+    }
+    let tmp = local.with_extension("sqlite3.pull-tmp");
+    fs::copy(replica, &tmp).wrap_err("failed to copy replica into pull-tmp")?;
+    for ext in ["sqlite3-wal", "sqlite3-shm"] {
+        let _ = fs::remove_file(local.with_extension(ext));
+    }
+    fs::rename(&tmp, local).wrap_err("failed to install pulled replica")?;
+    Ok(true)
+}
+
+/// Pushes the local DB to the replica path, atomically. Checkpoints the WAL
+/// first so the file copy contains all committed writes.
+fn try_push_to_replica(local: &Path, replica: &Path) -> Result<()> {
+    let _ = checkpoint_db(local);
+    if let Some(parent) = replica.parent() {
+        fs::create_dir_all(parent).wrap_err("failed to create replica directory")?;
+    }
+    let tmp = replica.with_extension("sqlite3.push-tmp");
+    fs::copy(local, &tmp).wrap_err("failed to copy local DB into push-tmp")?;
+    fs::rename(&tmp, replica).wrap_err("failed to install replica")?;
+    Ok(())
+}
+
+/// Reads `MAX(last_played_at)` from a DB. Runs pending migrations first so the
+/// column is available even on older DBs.
+fn db_max_last_played_at(path: &Path) -> Result<i64> {
+    use crate::schema::played_tracks::dsl as tracks;
+    let mut conn = establish_connection(path)?;
+    conn.run_pending_migrations(MIGRATIONS)
+        .map_err(|e| eyre!("migrate before reading max(last_played_at) failed: {e}"))?;
+    let max: Option<i64> = tracks::played_tracks
+        .select(diesel::dsl::max(tracks::last_played_at))
+        .first(&mut conn)
+        .map_err(|e| eyre!("max(last_played_at) query failed: {e}"))?;
+    Ok(max.unwrap_or(0))
+}
+
+fn checkpoint_db(path: &Path) -> Result<()> {
+    use diesel::connection::SimpleConnection;
+    let mut conn = establish_connection(path)?;
+    conn.batch_execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|e| eyre!("WAL checkpoint failed: {e}"))?;
+    Ok(())
 }
 
 fn sync_folder_config_path() -> Option<PathBuf> {
@@ -486,91 +525,6 @@ fn enable_wal_mode(conn: &mut SqliteConnection) -> Result<()> {
     use diesel::connection::SimpleConnection;
     conn.batch_execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
         .map_err(|e| eyre!("failed to enable WAL mode: {e}"))
-}
-
-/// Merges all rows from `old_path` into the DB at `new_path`.
-///
-/// Merge semantics per track:
-///   play_count         → summed
-///   total_play_seconds → summed
-///   first_played_at    → earliest of both
-///   last_played_at     → latest of both
-///   is_favorite        → true if either copy is true
-///   last_played_computer → from whichever had the more recent last_played_at
-///
-/// Runs pending migrations on the old DB first so missing columns (e.g.
-/// `last_played_computer`) are added before reading.
-fn merge_old_db_into(new_path: &Path, old_path: &Path, computer: &str) -> Result<()> {
-    use crate::schema::played_tracks::dsl as tracks;
-
-    let mut old_conn = establish_connection(old_path)?;
-    old_conn
-        .run_pending_migrations(MIGRATIONS)
-        .map_err(|e| eyre!("failed to migrate old DB before merge: {e}"))?;
-
-    let old_rows: Vec<PlayedTrackRow> = tracks::played_tracks
-        .select(PlayedTrackRow::as_select())
-        .load(&mut old_conn)?;
-
-    let mut new_conn = establish_connection(new_path)?;
-
-    for row in old_rows {
-        let row_computer = if row.last_played_computer.is_empty() {
-            computer.to_string()
-        } else {
-            row.last_played_computer.clone()
-        };
-
-        let existing = tracks::played_tracks
-            .filter(tracks::track_key.eq(&row.track_key))
-            .select(PlayedTrackRow::as_select())
-            .first::<PlayedTrackRow>(&mut new_conn)
-            .optional()
-            .map_err(|e| eyre!("merge read error: {e}"))?;
-
-        if let Some(existing) = existing {
-            let merged_computer = if row.last_played_at > existing.last_played_at {
-                row_computer.clone()
-            } else {
-                existing.last_played_computer.clone()
-            };
-            diesel::update(
-                tracks::played_tracks.filter(tracks::track_key.eq(&row.track_key)),
-            )
-            .set((
-                tracks::play_count.eq(existing.play_count + row.play_count),
-                tracks::total_play_seconds
-                    .eq(existing.total_play_seconds + row.total_play_seconds),
-                tracks::first_played_at
-                    .eq(existing.first_played_at.min(row.first_played_at)),
-                tracks::last_played_at
-                    .eq(existing.last_played_at.max(row.last_played_at)),
-                tracks::is_favorite.eq(existing.is_favorite || row.is_favorite),
-                tracks::last_played_computer.eq(merged_computer),
-            ))
-            .execute(&mut new_conn)
-            .map_err(|e| eyre!("merge update error: {e}"))?;
-        } else {
-            let new_row = NewPlayedTrack {
-                track_key: &row.track_key,
-                replay_target: &row.replay_target,
-                title: &row.title,
-                platform: &row.platform,
-                is_favorite: row.is_favorite,
-                play_count: row.play_count,
-                total_play_seconds: row.total_play_seconds,
-                first_played_at: row.first_played_at,
-                last_played_at: row.last_played_at,
-                last_played_computer: &row_computer,
-            };
-            diesel::insert_into(tracks::played_tracks)
-                .values(&new_row)
-                .execute(&mut new_conn)
-                .map_err(|e| eyre!("merge insert error: {e}"))?;
-        }
-    }
-
-    Ok(())
 }
 
 fn default_db_path() -> Result<PathBuf> {
@@ -635,83 +589,99 @@ mod tests {
     }
 
     #[test]
-    fn merge_combines_play_counts() {
-        let dir_a = tempdir().unwrap();
-        let dir_b = tempdir().unwrap();
-        let path_a = dir_a.path().join("a.sqlite3");
-        let path_b = dir_b.path().join("b.sqlite3");
+    fn pull_replica_skips_when_replica_not_newer() {
+        let dir = tempdir().unwrap();
+        let local = dir.path().join("local.sqlite3");
+        let replica = dir.path().join("replica.sqlite3");
 
-        let storage_a = Storage::open_and_migrate_at(path_a.clone()).unwrap();
-        let record = TrackRecord {
-            track_key: "key-x".into(),
-            replay_target: "key-x".into(),
-            title: "X".into(),
-            platform: "Local".into(),
-        };
-        storage_a.record_play(&record).unwrap();
-        storage_a.record_play(&record).unwrap();
-        storage_a.record_play(&record).unwrap();
-        storage_a.record_playback_time("key-x", 30).unwrap();
-
-        let storage_b = Storage::open_and_migrate_at(path_b.clone()).unwrap();
-        storage_b.record_play(&record).unwrap();
-        storage_b.record_play(&record).unwrap();
-        storage_b.record_playback_time("key-x", 20).unwrap();
-        let record_y = TrackRecord {
-            track_key: "key-y".into(),
-            replay_target: "key-y".into(),
-            title: "Y".into(),
-            platform: "Local".into(),
-        };
-        storage_b.record_play(&record_y).unwrap();
-        drop(storage_a);
-        drop(storage_b);
-
-        merge_old_db_into(&path_a, &path_b, "Computer B").unwrap();
-
-        let storage_a = Storage::open_and_migrate_at(path_a).unwrap();
-        let rows = storage_a
-            .list_history(HistorySortField::PlayCount, true)
+        let storage = Storage::open_and_migrate_at(local.clone()).unwrap();
+        storage
+            .record_play(&TrackRecord {
+                track_key: "key-x".into(),
+                replay_target: "key-x".into(),
+                title: "X".into(),
+                platform: "Local".into(),
+            })
             .unwrap();
+        drop(storage);
 
-        let x = rows.iter().find(|r| r.track_key == "key-x").unwrap();
-        assert_eq!(x.play_count, 5, "play_count should be summed (3+2)");
-        assert_eq!(x.total_play_seconds, 50, "total_play_seconds should be summed (30+20)");
+        // Snapshot local as the replica — same max(last_played_at).
+        fs::copy(&local, &replica).unwrap();
 
-        let y = rows.iter().find(|r| r.track_key == "key-y").unwrap();
-        assert_eq!(y.play_count, 1);
-        // last_played_computer is set by record_play at insert time — just verify it's non-empty
-        assert!(!y.last_played_computer.is_empty());
+        let pulled = try_pull_from_replica(&replica, &local).unwrap();
+        assert!(!pulled, "equal max(last_played_at) should not pull");
     }
 
     #[test]
-    fn merge_preserves_favorite() {
-        let dir_a = tempdir().unwrap();
-        let dir_b = tempdir().unwrap();
-        let path_a = dir_a.path().join("a.sqlite3");
-        let path_b = dir_b.path().join("b.sqlite3");
+    fn pull_replica_replaces_local_when_replica_newer() {
+        let dir = tempdir().unwrap();
+        let local = dir.path().join("local.sqlite3");
+        let replica = dir.path().join("replica.sqlite3");
 
-        let storage_a = Storage::open_and_migrate_at(path_a.clone()).unwrap();
-        let storage_b = Storage::open_and_migrate_at(path_b.clone()).unwrap();
-        let record = TrackRecord {
-            track_key: "track-1".into(),
-            replay_target: "track-1".into(),
-            title: "One".into(),
-            platform: "Local".into(),
-        };
-        storage_a.record_play(&record).unwrap();
-        storage_a.toggle_favorite("track-1").unwrap();
-        storage_b.record_play(&record).unwrap();
-        drop(storage_a);
-        drop(storage_b);
+        // Populate local with one record.
+        let storage = Storage::open_and_migrate_at(local.clone()).unwrap();
+        storage
+            .record_play(&TrackRecord {
+                track_key: "old".into(),
+                replay_target: "old".into(),
+                title: "Old".into(),
+                platform: "Local".into(),
+            })
+            .unwrap();
+        drop(storage);
 
-        merge_old_db_into(&path_a, &path_b, "Computer B").unwrap();
+        // Replica gets a record with a later last_played_at.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let storage = Storage::open_and_migrate_at(replica.clone()).unwrap();
+        storage
+            .record_play(&TrackRecord {
+                track_key: "new".into(),
+                replay_target: "new".into(),
+                title: "New".into(),
+                platform: "Local".into(),
+            })
+            .unwrap();
+        drop(storage);
 
-        let storage_a = Storage::open_and_migrate_at(path_a).unwrap();
+        let pulled = try_pull_from_replica(&replica, &local).unwrap();
+        assert!(pulled, "newer replica should overwrite local");
+
+        let storage = Storage::open_and_migrate_at(local).unwrap();
+        let rows = storage
+            .list_history(HistorySortField::LastPlayed, true)
+            .unwrap();
+        assert!(rows.iter().any(|r| r.track_key == "new"));
         assert!(
-            storage_a.favorite_for("track-1").unwrap(),
-            "favorite should be preserved (OR semantics)"
+            !rows.iter().any(|r| r.track_key == "old"),
+            "pull is a copy, not a merge — old local rows are replaced"
         );
+    }
+
+    #[test]
+    fn push_replica_creates_replica_when_missing() {
+        let dir = tempdir().unwrap();
+        let local = dir.path().join("local.sqlite3");
+        let replica = dir.path().join("nested").join("replica.sqlite3");
+
+        let storage = Storage::open_and_migrate_at(local.clone()).unwrap();
+        storage
+            .record_play(&TrackRecord {
+                track_key: "k".into(),
+                replay_target: "k".into(),
+                title: "T".into(),
+                platform: "Local".into(),
+            })
+            .unwrap();
+        drop(storage);
+
+        try_push_to_replica(&local, &replica).unwrap();
+        assert!(replica.exists(), "push should create replica file");
+
+        let storage = Storage::open_and_migrate_at(replica).unwrap();
+        let rows = storage
+            .list_history(HistorySortField::LastPlayed, true)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]
