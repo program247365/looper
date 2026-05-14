@@ -23,6 +23,7 @@ pub struct TrackInfo {
     pub pending_download: Option<PendingDownload>,
     pub service: Option<String>,
     pub thumbnail_path: Option<PathBuf>,
+    pub is_live: bool,
 }
 
 pub trait ServicePlugin {

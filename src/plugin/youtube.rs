@@ -1,7 +1,8 @@
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{bail, Result};
 use std::path::Path;
 
 use super::{ytdlp, ServicePlugin, TrackInfo};
+use ytdlp::LiveStatus;
 
 pub struct YouTube;
 
@@ -17,7 +18,32 @@ impl ServicePlugin for YouTube {
 
     fn resolve(&self, url: &str, cache_dir: &Path) -> Result<Vec<TrackInfo>> {
         let normalized = normalize_youtube_url(url);
-        ytdlp::resolve_url(&normalized, cache_dir, "YouTube")
+        let entries = ytdlp::extract_metadata(&normalized)?;
+        if entries.is_empty() {
+            bail!("yt-dlp returned no playable tracks for {normalized}");
+        }
+
+        entries
+            .into_iter()
+            .map(|entry| match entry.live_status {
+                LiveStatus::IsLive => {
+                    let id = entry.id.clone();
+                    let mut track = ytdlp::streaming_track_from_entry(entry, "YouTube")?;
+                    if let Some(source_url) = track.source_url.clone() {
+                        let _ = ytdlp::download_thumbnail_only(&source_url, cache_dir);
+                        track.thumbnail_path = ytdlp::thumbnail_for(cache_dir, &id);
+                    }
+                    Ok(track)
+                }
+                LiveStatus::IsUpcoming => bail!(
+                    "`{}` is a scheduled livestream that hasn't started yet; try again once it goes live",
+                    entry.title
+                ),
+                LiveStatus::WasLive | LiveStatus::NotLive => {
+                    Ok(ytdlp::cached_track_from_entry(entry, cache_dir, "YouTube"))
+                }
+            })
+            .collect()
     }
 }
 
