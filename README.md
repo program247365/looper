@@ -11,7 +11,7 @@
 It supports:
 
 - local audio files
-- YouTube URLs
+- YouTube URLs (including live streams)
 - SoundCloud URLs
 - HypeM URLs
 - single tracks and playlists
@@ -90,6 +90,19 @@ looper play --url "/path/to/your/song.mp3"
 looper play --url "https://www.youtube.com/watch?v=xAR6N9N8e6U"
 ```
 
+### YouTube Live
+
+Livestream URLs are detected automatically and played as a continuous stream
+(no full download, no loop counter — a red `● STREAMING` badge replaces the
+usual `● PLAYING` label).
+
+```shell
+cargo run -- play --url "https://www.youtube.com/watch?v=YmQ7jRgf4f0"
+```
+
+That example is Anthropic's Claude FM channel — music for thinking and
+building.
+
 ### SoundCloud
 
 ```shell
@@ -121,6 +134,9 @@ looper play --url "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD
 Current behavior is intentionally pragmatic:
 
 - YouTube uses a download-first cached path for reliability
+- YouTube livestreams (`live_status: is_live`) are auto-detected and routed to a
+  stream-first path with looping disabled; scheduled-but-not-yet-live URLs fail
+  fast with a helpful message instead of hanging
 - SoundCloud and HypeM prefer a stream-first path and fall back to cached download when needed
 
 ## Data and Cache Locations

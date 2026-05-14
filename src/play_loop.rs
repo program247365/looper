@@ -206,6 +206,7 @@ fn play_file_session(
                     pending_download: None,
                     service: None,
                     thumbnail_path: None,
+                    is_live: false,
                 }],
                 false,
                 ctx,
@@ -859,7 +860,7 @@ fn play_single_track(
         0,
         sync_warning,
     )?;
-    let player = AudioPlayer::new(track.playback.clone(), !is_playlist)?;
+    let player = AudioPlayer::new(track.playback.clone(), !is_playlist && !track.is_live)?;
     wait_for_player_ready(
         terminal,
         title_state,
@@ -902,6 +903,7 @@ fn play_single_track(
         history_panel: None,
         sync_warning: sync_warning.cloned(),
         thumbnail,
+        is_live: track.is_live,
     };
 
     if let Some(media) = &ctx.media {
@@ -1370,6 +1372,7 @@ mod tests {
             history_panel: None,
             sync_warning: None,
             thumbnail: None,
+            is_live: false,
         }
     }
 

@@ -17,6 +17,34 @@ pub struct MetadataEntry {
     pub title: String,
     pub duration_secs: Option<f64>,
     pub webpage_url: String,
+    pub live_status: LiveStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveStatus {
+    /// Currently broadcasting. Must be streamed; cannot be downloaded.
+    IsLive,
+    /// Scheduled but not started. Bail with a helpful message.
+    IsUpcoming,
+    /// Past livestream now archived as VOD. Treat as a regular download.
+    WasLive,
+    /// Not a livestream at all.
+    NotLive,
+}
+
+impl LiveStatus {
+    fn from_metadata(live_status: Option<&str>, is_live: Option<bool>) -> Self {
+        match live_status {
+            Some("is_live") => Self::IsLive,
+            Some("is_upcoming") => Self::IsUpcoming,
+            Some("was_live") | Some("post_live") => Self::WasLive,
+            Some("not_live") => Self::NotLive,
+            _ => match is_live {
+                Some(true) => Self::IsLive,
+                _ => Self::NotLive,
+            },
+        }
+    }
 }
 
 pub fn check_installed() -> Result<()> {
@@ -40,27 +68,44 @@ pub fn resolve_url(url: &str, cache_dir: &Path, service: &str) -> Result<Vec<Tra
 
     tracks
         .into_iter()
-        .map(|track| {
-            let local_path = cache_path(cache_dir, &track.id);
-            let pending_download = if local_path.exists() {
-                None
-            } else {
-                Some(PendingDownload {
-                    source_url: track.webpage_url.clone(),
-                })
-            };
-            let thumbnail_path = thumbnail_for(cache_dir, &track.id);
-            Ok(TrackInfo {
-                title: track.title,
-                duration_secs: track.duration_secs,
-                playback: PlaybackInput::file(local_path),
-                source_url: Some(track.webpage_url),
-                pending_download,
-                service: Some(service.to_string()),
-                thumbnail_path,
-            })
-        })
+        .map(|track| Ok(cached_track_from_entry(track, cache_dir, service)))
         .collect()
+}
+
+pub fn cached_track_from_entry(entry: MetadataEntry, cache_dir: &Path, service: &str) -> TrackInfo {
+    let local_path = cache_path(cache_dir, &entry.id);
+    let pending_download = if local_path.exists() {
+        None
+    } else {
+        Some(PendingDownload {
+            source_url: entry.webpage_url.clone(),
+        })
+    };
+    let thumbnail_path = thumbnail_for(cache_dir, &entry.id);
+    TrackInfo {
+        title: entry.title,
+        duration_secs: entry.duration_secs,
+        playback: PlaybackInput::file(local_path),
+        source_url: Some(entry.webpage_url),
+        pending_download,
+        service: Some(service.to_string()),
+        thumbnail_path,
+        is_live: false,
+    }
+}
+
+pub fn streaming_track_from_entry(entry: MetadataEntry, service: &str) -> Result<TrackInfo> {
+    let playback = resolve_stream_url(&entry.webpage_url)?;
+    Ok(TrackInfo {
+        title: entry.title,
+        duration_secs: entry.duration_secs,
+        playback,
+        source_url: Some(entry.webpage_url),
+        pending_download: None,
+        service: Some(service.to_string()),
+        thumbnail_path: None,
+        is_live: matches!(entry.live_status, LiveStatus::IsLive),
+    })
 }
 
 pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
@@ -74,6 +119,7 @@ pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
         .map(|entry| {
             let service = service_label(&entry.webpage_url).to_string();
             let playback = resolve_stream_url(&entry.webpage_url)?;
+            let is_live = matches!(entry.live_status, LiveStatus::IsLive);
             Ok(TrackInfo {
                 title: entry.title,
                 duration_secs: entry.duration_secs,
@@ -82,6 +128,7 @@ pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
                 pending_download: None,
                 service: Some(service),
                 thumbnail_path: None,
+                is_live,
             })
         })
         .collect()
@@ -129,7 +176,7 @@ fn verify_stream_access(url: &str) -> Result<()> {
     );
 }
 
-fn extract_metadata(url: &str) -> Result<Vec<MetadataEntry>> {
+pub fn extract_metadata(url: &str) -> Result<Vec<MetadataEntry>> {
     extract_entries(url)
 }
 
@@ -161,19 +208,22 @@ pub fn thumbnail_for(cache_dir: &Path, id: &str) -> Option<PathBuf> {
 /// Non-fatal: errors are returned but the caller is expected to swallow them.
 pub fn download_thumbnail_only(url: &str, cache_dir: &Path) -> Result<()> {
     let output_template = cache_dir.join("%(id)s.%(ext)s");
-    let status = Command::new("yt-dlp")
+    let output = Command::new("yt-dlp")
         .arg("--skip-download")
         .arg("--write-thumbnail")
         .arg("--convert-thumbnails")
         .arg("jpg")
         .arg("--no-playlist")
         .arg("--no-warnings")
+        .arg("--quiet")
         .arg("-o")
         .arg(&output_template)
         .arg(url)
-        .status()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
         .wrap_err("failed to execute yt-dlp thumbnail backfill")?;
-    if !status.success() {
+    if !output.status.success() {
         bail!("yt-dlp thumbnail backfill exited with non-success status");
     }
     Ok(())
@@ -321,11 +371,17 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
         })
         .unwrap_or_else(|| fallback_url.to_string());
 
+    let live_status = LiveStatus::from_metadata(
+        value.get("live_status").and_then(Value::as_str),
+        value.get("is_live").and_then(Value::as_bool),
+    );
+
     Ok(MetadataEntry {
         id,
         title,
         duration_secs,
         webpage_url,
+        live_status,
     })
 }
 
@@ -467,7 +523,40 @@ fn parse_u64(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_progress_line;
+    use super::{parse_progress_line, LiveStatus};
+
+    #[test]
+    fn live_status_prefers_string_field() {
+        assert_eq!(
+            LiveStatus::from_metadata(Some("is_live"), Some(false)),
+            LiveStatus::IsLive
+        );
+        assert_eq!(
+            LiveStatus::from_metadata(Some("is_upcoming"), None),
+            LiveStatus::IsUpcoming
+        );
+        assert_eq!(
+            LiveStatus::from_metadata(Some("was_live"), None),
+            LiveStatus::WasLive
+        );
+        assert_eq!(
+            LiveStatus::from_metadata(Some("post_live"), None),
+            LiveStatus::WasLive
+        );
+    }
+
+    #[test]
+    fn live_status_falls_back_to_is_live_bool() {
+        assert_eq!(
+            LiveStatus::from_metadata(None, Some(true)),
+            LiveStatus::IsLive
+        );
+        assert_eq!(
+            LiveStatus::from_metadata(None, Some(false)),
+            LiveStatus::NotLive
+        );
+        assert_eq!(LiveStatus::from_metadata(None, None), LiveStatus::NotLive);
+    }
 
     #[test]
     fn parses_progress_line_with_total_bytes() {

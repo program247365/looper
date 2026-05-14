@@ -45,6 +45,7 @@ pub struct AppState {
     pub history_panel: Option<HistoryPanelState>,
     pub sync_warning: Option<SyncWarning>,
     pub thumbnail: Option<StatefulProtocol>,
+    pub is_live: bool,
 }
 
 #[derive(Clone)]
@@ -109,6 +110,7 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
 const SYNC_WARNING_HEIGHT: u16 = 7;
 
 pub fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
+    frame.render_widget(Clear, frame.area());
     let body_area = match state.sync_warning.as_ref() {
         Some(warning) => {
             let chunks = Layout::default()
@@ -181,6 +183,7 @@ fn draw_sync_warning(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, wa
 }
 
 pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
+    frame.render_widget(Clear, frame.area());
     let area = match state.sync_warning.as_ref() {
         Some(warning) => {
             let split = Layout::default()
@@ -258,6 +261,7 @@ pub fn draw_history_browser(
     panel: &HistoryPanelState,
     sync_warning: Option<&SyncWarning>,
 ) {
+    frame.render_widget(Clear, frame.area());
     let area = match sync_warning {
         Some(warning) => {
             let split = Layout::default()
@@ -401,12 +405,16 @@ fn draw_fullscreen_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, s
 fn draw_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
     let (status_text, status_color) = if state.paused {
         ("⏸  PAUSED", Color::Yellow)
+    } else if state.is_live {
+        ("●  STREAMING", Color::Rgb(255, 80, 80))
     } else {
         ("●  PLAYING", Color::Green)
     };
 
     let secondary_text = if state.is_playlist {
         format!("Track {}/{}", state.track_index, state.total_tracks)
+    } else if state.is_live {
+        "LIVE".to_string()
     } else {
         format!("Loop #{} of ∞", state.loop_count)
     };
@@ -789,11 +797,15 @@ fn draw_micro_status(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, st
 
     let status = if state.paused {
         "⏸ PAUSED"
+    } else if state.is_live {
+        "● STREAMING"
     } else {
         "● PLAYING"
     };
     let secondary_info = if state.is_playlist {
         format!("Track {}/{}", state.track_index, state.total_tracks)
+    } else if state.is_live {
+        "LIVE".to_string()
     } else {
         format!("Loop #{}", state.loop_count)
     };
@@ -821,7 +833,14 @@ fn draw_micro_status(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, st
         Span::raw("  "),
         Span::styled(secondary_info, Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
-        Span::styled(status, Style::default().fg(Color::Rgb(120, 220, 80))),
+        Span::styled(
+            status,
+            Style::default().fg(if state.is_live {
+                Color::Rgb(255, 80, 80)
+            } else {
+                Color::Rgb(120, 220, 80)
+            }),
+        ),
     ];
     if let Some(cache_info) = cache_info {
         spans.push(Span::raw("  "));
