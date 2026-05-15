@@ -6,7 +6,10 @@
       "Bash(RUST_BACKTRACE=1 perl -e 'alarm 25; exec @ARGV' cargo run -- play --url \"https://hypem.com/track/2461j/Broken+Bells+-+Holding+On+For+Life+%28Zeds+Dead+Remix%29\")",
       "Bash(echo \"EXIT: $?\")",
       "Bash(xxd)",
-      "Bash(ffmpeg -i pipe: -map a -f wav -loglevel error -)"
+      "Bash(ffmpeg -i pipe: -map a -f wav -loglevel error -)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(make release *)"
     ]
   }
 }
