@@ -97,7 +97,7 @@ Livestream URLs are detected automatically and played as a continuous stream
 usual `● PLAYING` label).
 
 ```shell
-cargo run -- play --url "https://www.youtube.com/watch?v=YmQ7jRgf4f0"
+looper play --url "https://www.youtube.com/watch?v=YmQ7jRgf4f0"
 ```
 
 That example is Anthropic's Claude FM channel — music for thinking and
