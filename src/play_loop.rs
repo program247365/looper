@@ -280,8 +280,12 @@ fn run_loop(
     ctx: &PlaybackContext,
 ) -> Result<LoopAction> {
     // Frame rate control: only render when needed
-    const RENDER_FPS: u64 = 30; // Target 30 FPS max
-    let render_interval = Duration::from_millis(1000 / RENDER_FPS);
+    const RENDER_FPS: u64 = 30; // Target 30 FPS while playing
+    // The paused screensaver's slowest sinusoid cycles every ~13s, so a few
+    // frames per second is indistinguishable to the eye and keeps idle CPU low.
+    const RENDER_FPS_PAUSED: u64 = 4;
+    let render_interval_playing = Duration::from_millis(1000 / RENDER_FPS);
+    let render_interval_paused = Duration::from_millis(1000 / RENDER_FPS_PAUSED);
     let mut last_render = Instant::now();
     let mut needs_render: bool;
 
@@ -292,6 +296,12 @@ fn run_loop(
         }
         // Always render when playing or paused (wave screensaver needs frame_count to advance)
         needs_render = true;
+
+        let render_interval = if state.paused {
+            render_interval_paused
+        } else {
+            render_interval_playing
+        };
 
         // Check if enough time passed for next frame
         let time_since_render = last_render.elapsed();
