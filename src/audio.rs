@@ -3,6 +3,7 @@ use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,6 +11,8 @@ use stream_download::http::HttpStream;
 use stream_download::process::{
     Command as ProcessCommand, CommandBuilder, FfmpegConvertAudioCommand, ProcessStreamParams,
 };
+use stream_download::storage::adaptive::AdaptiveStorageProvider;
+use stream_download::storage::memory::MemoryStorageProvider;
 use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
 use tokio::runtime::Runtime;
@@ -20,6 +23,21 @@ use stream_download::http::reqwest::Client as ReqwestClient;
 
 // Enough for 2048 mono FFT samples even with stereo input (2048 * 2 channels * 2x headroom)
 const BUF_CAP: usize = 8192;
+const STREAM_STORAGE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
+fn stream_storage() -> AdaptiveStorageProvider<MemoryStorageProvider, TempStorageProvider> {
+    stream_storage_with_buffer(STREAM_STORAGE_BUFFER_BYTES)
+}
+
+fn stream_storage_with_buffer(
+    buffer_bytes: usize,
+) -> AdaptiveStorageProvider<MemoryStorageProvider, TempStorageProvider> {
+    AdaptiveStorageProvider::with_fixed_and_variable(
+        MemoryStorageProvider,
+        TempStorageProvider::new(),
+        NonZeroUsize::new(buffer_bytes).expect("stream storage buffer size must be nonzero"),
+    )
+}
 
 /// Wraps a Source and copies every sample into a shared ring buffer.
 /// Uses try_lock so the audio thread never blocks waiting for the main thread.
@@ -163,13 +181,9 @@ fn open_input(
                     .await
                     .wrap_err("failed to create HTTP audio stream")?;
 
-                    StreamDownload::from_stream(
-                        stream,
-                        TempStorageProvider::new(),
-                        Settings::default(),
-                    )
-                    .await
-                    .wrap_err("failed to open HTTP audio stream")
+                    StreamDownload::from_stream(stream, stream_storage(), Settings::default())
+                        .await
+                        .wrap_err("failed to open HTTP audio stream")
                 })
                 .wrap_err("failed to open HTTP audio stream")?;
             Ok((Box::new(reader), None, Some(runtime)))
@@ -193,7 +207,7 @@ fn open_input(
                         .wrap_err("failed to configure process audio pipeline")?;
                     StreamDownload::new_process(
                         params,
-                        TempStorageProvider::new(),
+                        stream_storage(),
                         Settings::default().cancel_on_drop(false),
                     )
                     .await
@@ -260,4 +274,30 @@ fn probe_duration_symphonia(path: &str) -> Option<Duration> {
     Some(Duration::from_secs_f64(
         n_frames as f64 / sample_rate as f64,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_storage_with_buffer;
+    use std::io::{Read, Write};
+    use stream_download::storage::adaptive::{AdaptiveStorageReader, AdaptiveStorageWriter};
+    use stream_download::storage::StorageProvider;
+
+    #[test]
+    fn unknown_length_stream_storage_is_bounded() {
+        let (mut reader, mut writer) = stream_storage_with_buffer(4)
+            .into_reader_writer(None)
+            .expect("stream storage should initialize");
+
+        assert!(matches!(reader, AdaptiveStorageReader::Bounded(_)));
+        assert!(matches!(writer, AdaptiveStorageWriter::Bounded(_)));
+
+        assert_eq!(writer.write(&[1, 2, 3, 4, 5]).unwrap(), 4);
+        assert_eq!(writer.write(&[5]).unwrap(), 0);
+
+        let mut read_buf = [0; 2];
+        assert_eq!(reader.read(&mut read_buf).unwrap(), 2);
+        assert_eq!(read_buf, [1, 2]);
+        assert_eq!(writer.write(&[5, 6]).unwrap(), 2);
+    }
 }
