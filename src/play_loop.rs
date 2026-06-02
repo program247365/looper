@@ -346,7 +346,15 @@ fn run_loop(
                 if player.sink.empty() {
                     return Ok(LoopAction::NextTrack);
                 }
+            } else if player.try_refill_loop()? {
+                state.loop_count += 1;
+                state.loop_start = Instant::now();
+                needs_render = true;
             } else if let Some(dur) = state.duration {
+                // Fallback for non-file repeating sources (e.g. SoundCloud
+                // stream-first) which still go through `repeat_infinite()`:
+                // the sink never empties so we estimate loop boundaries from
+                // wall-clock elapsed vs. known duration.
                 if state.elapsed() >= dur {
                     state.loop_count += 1;
                     state.loop_start = Instant::now();

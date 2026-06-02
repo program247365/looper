@@ -85,6 +85,8 @@ pub struct AudioPlayer {
     pub sample_buf: Arc<Mutex<VecDeque<f32>>>,
     pub sample_rate: u32,
     pub channels: u16,
+    input: PlaybackInput,
+    refillable: bool,
 }
 
 trait MediaReader: Read + Seek + Send + Sync {}
@@ -103,8 +105,14 @@ impl AudioPlayer {
         let sample_rate = source.sample_rate();
         let channels = source.channels();
 
+        // File-backed sources can be cheaply re-opened from disk, so we play
+        // them once and refill the sink on each loop boundary instead of using
+        // rodio's `repeat_infinite()` — which materializes the entire decoded
+        // PCM in RAM via `Buffered`. For long tracks that grows unbounded.
+        let refillable = repeat && matches!(input, PlaybackInput::File(_));
+
         let buf = Arc::new(Mutex::new(VecDeque::with_capacity(BUF_CAP)));
-        if repeat {
+        if repeat && !refillable {
             let tapped = SampleTap {
                 inner: source.repeat_infinite(),
                 buf: buf.clone(),
@@ -127,6 +135,8 @@ impl AudioPlayer {
             sample_buf: buf,
             sample_rate,
             channels,
+            input,
+            refillable,
         })
     }
 
@@ -140,6 +150,23 @@ impl AudioPlayer {
 
     pub fn skip(&self) {
         self.sink.stop();
+    }
+
+    /// If this player loops a file-backed source and the sink has drained,
+    /// reopen the file, decode a fresh source, and queue it. Returns true
+    /// when a refill happened so the caller can advance its loop counter.
+    pub fn try_refill_loop(&self) -> Result<bool> {
+        if !self.refillable || !self.sink.empty() {
+            return Ok(false);
+        }
+        let (reader, _, _) = open_input(&self.input)?;
+        let source = decode_input(reader, &self.input)?.convert_samples::<f32>();
+        let tapped = SampleTap {
+            inner: source,
+            buf: self.sample_buf.clone(),
+        };
+        self.sink.append(tapped);
+        Ok(true)
     }
 }
 
