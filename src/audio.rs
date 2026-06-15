@@ -152,6 +152,28 @@ impl AudioPlayer {
         self.sink.stop();
     }
 
+    pub fn seek_to(&self, position: Duration) -> Result<bool> {
+        if !matches!(self.input, PlaybackInput::File(_)) {
+            return Ok(false);
+        }
+
+        let (reader, _, _) = open_input(&self.input)?;
+        let source = decode_input(reader, &self.input)?
+            .convert_samples::<f32>()
+            .skip_duration(position);
+        let tapped = SampleTap {
+            inner: source,
+            buf: self.sample_buf.clone(),
+        };
+
+        self.sink.stop();
+        self.sink.append(tapped);
+        if let Ok(mut buf) = self.sample_buf.lock() {
+            buf.clear();
+        }
+        Ok(true)
+    }
+
     /// If this player loops a file-backed source and the sink has drained,
     /// reopen the file, decode a fresh source, and queue it. Returns true
     /// when a refill happened so the caller can advance its loop counter.

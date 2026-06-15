@@ -60,6 +60,7 @@ PLAYBACK BEHAVIOR:
 TUI CONTROLS:
     q / Ctrl-C     Quit
     Space          Pause / resume
+    Left / Right   Seek backward / forward 5 seconds (local/cached)
     n              Next track (playlist mode)
     b              Previous track (playlist mode)
     f              Toggle fullscreen visualizer

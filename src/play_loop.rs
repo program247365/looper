@@ -31,6 +31,8 @@ use crate::tui::{
     HistoryPanelState, StartupProgressState, StartupScreenState, N_BANDS,
 };
 
+const SEEK_STEP: Duration = Duration::from_secs(5);
+
 pub struct PlaybackContext<'a> {
     pub cmd_rx: &'a Receiver<KeyCommand>,
     pub media: Option<MediaSessionHandle>,
@@ -158,6 +160,8 @@ fn browse_history_session(
                     | KeyCommand::TogglePause
                     | KeyCommand::NextTrack
                     | KeyCommand::PreviousTrack
+                    | KeyCommand::SeekForward
+                    | KeyCommand::SeekBackward
                     | KeyCommand::ToggleFullscreen
                     | KeyCommand::ToggleFavorite
                     | KeyCommand::ToggleHistory => {}
@@ -348,7 +352,8 @@ fn run_loop(
     ctx: &PlaybackContext,
 ) -> Result<LoopAction> {
     // Frame rate control: only render when needed
-    const RENDER_FPS: u64 = 30; // Target 30 FPS while playing
+    // Target 30 FPS while playing.
+    const RENDER_FPS: u64 = 30;
     // The paused screensaver's slowest sinusoid cycles every ~13s, so a few
     // frames per second is indistinguishable to the eye and keeps idle CPU low.
     const RENDER_FPS_PAUSED: u64 = 4;
@@ -486,6 +491,16 @@ fn dispatch_command(
                 Ok(None)
             }
         }
+        KeyCommand::SeekForward => {
+            seek_track(state, player, SeekDirection::Forward, media)?;
+            *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::SeekBackward => {
+            seek_track(state, player, SeekDirection::Backward, media)?;
+            *needs_render = true;
+            Ok(None)
+        }
         KeyCommand::ToggleFullscreen => {
             state.fullscreen = !state.fullscreen;
             *needs_render = true;
@@ -576,6 +591,54 @@ fn dispatch_command(
     }
 }
 
+#[derive(Clone, Copy)]
+enum SeekDirection {
+    Backward,
+    Forward,
+}
+
+fn seek_track(
+    state: &mut AppState,
+    player: &AudioPlayer,
+    direction: SeekDirection,
+    media: Option<&MediaSessionHandle>,
+) -> Result<()> {
+    let target = seek_target(state.elapsed(), direction, state.duration);
+    if !player.seek_to(target)? {
+        return Ok(());
+    }
+
+    set_elapsed(state, target);
+    if let Some(media) = media {
+        media.set_playback(state.paused, state.elapsed());
+    }
+    Ok(())
+}
+
+fn seek_target(
+    current: Duration,
+    direction: SeekDirection,
+    duration: Option<Duration>,
+) -> Duration {
+    let target = match direction {
+        SeekDirection::Backward => current.saturating_sub(SEEK_STEP),
+        SeekDirection::Forward => current + SEEK_STEP,
+    };
+
+    match duration {
+        Some(duration) => target.min(duration),
+        None => target,
+    }
+}
+
+fn set_elapsed(state: &mut AppState, elapsed: Duration) {
+    if state.paused {
+        state.pause_elapsed = elapsed;
+    } else {
+        state.loop_start = Instant::now() - elapsed;
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum KeyCommand {
     None,
@@ -583,6 +646,8 @@ pub(crate) enum KeyCommand {
     TogglePause,
     NextTrack,
     PreviousTrack,
+    SeekForward,
+    SeekBackward,
     ToggleFullscreen,
     ToggleFavorite,
     ToggleHistory,
@@ -619,6 +684,8 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
             (KeyCode::Char(' '), _) => KeyCommand::TogglePause,
             (KeyCode::Char('n'), _) => KeyCommand::NextTrack,
             (KeyCode::Char('b'), _) => KeyCommand::PreviousTrack,
+            (KeyCode::Right, _) => KeyCommand::SeekForward,
+            (KeyCode::Left, _) => KeyCommand::SeekBackward,
             (KeyCode::Char('f'), _) => KeyCommand::ToggleFullscreen,
             (KeyCode::Char('s'), _) => KeyCommand::ToggleFavorite,
             (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
@@ -1430,6 +1497,43 @@ mod tests {
     }
 
     #[test]
+    fn arrow_keys_seek_during_playback() {
+        let state = base_state();
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &state),
+            KeyCommand::SeekForward
+        );
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &state),
+            KeyCommand::SeekBackward
+        );
+    }
+
+    #[test]
+    fn seek_target_clamps_to_track_bounds() {
+        assert_eq!(
+            seek_target(
+                Duration::from_secs(2),
+                SeekDirection::Backward,
+                Some(Duration::from_secs(30))
+            ),
+            Duration::from_secs(0)
+        );
+        assert_eq!(
+            seek_target(
+                Duration::from_secs(28),
+                SeekDirection::Forward,
+                Some(Duration::from_secs(30))
+            ),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            seek_target(Duration::from_secs(28), SeekDirection::Forward, None),
+            Duration::from_secs(33)
+        );
+    }
+
+    #[test]
     fn history_uses_vim_keys() {
         let mut state = base_state();
         state.history_panel = Some(HistoryPanelState {
@@ -1477,6 +1581,14 @@ mod tests {
                 &state
             ),
             KeyCommand::HistorySortNext
+        );
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &state),
+            KeyCommand::None
+        );
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &state),
+            KeyCommand::None
         );
     }
 
