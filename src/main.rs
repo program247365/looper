@@ -11,6 +11,7 @@ mod play_loop;
 mod playback_input;
 mod plugin;
 mod schema;
+mod startup_logo;
 mod storage;
 mod tui;
 use play_loop::{browse_history, play_file, PlaybackContext};

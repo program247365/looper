@@ -226,21 +226,17 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
         ])
         .split(panel_inner);
 
-    let title = vec![
-        Line::from("  _                                   .-''''-.    .-''''-. "),
-        Line::from(" | |    ___   ___  _ __   ___ _ __  .'  .-.  '. .'  .-.  '."),
-        Line::from(" | |   / _ \\ / _ \\| '_ \\ / _ \\ '__|/   /   \\   V   /   \\   \\"),
-        Line::from(" | |__| (_) | (_) | |_) |  __/ |   \\   \\   /       \\   /   /"),
-        Line::from(" |_____\\___/ \\___/| .__/ \\___|_|    '.  '-'  .' '.  '-'  .' "),
-        Line::from("                  |_|                 '-.__.-'   '-.__.-'   "),
-    ];
-
+    let logo_fraction = state
+        .progress
+        .as_ref()
+        .and_then(|p| p.progress.as_ref())
+        .and_then(DownloadProgress::fraction);
     frame.render_widget(
-        Paragraph::new(title).alignment(Alignment::Center).style(
-            Style::default()
-                .fg(Color::Rgb(255, 180, 80))
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(crate::startup_logo::dither_logo(
+            state.frame_count,
+            logo_fraction,
+        ))
+        .alignment(Alignment::Center),
         chunks[0],
     );
 
