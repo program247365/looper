@@ -11,7 +11,7 @@ use std::{
     io::{stdout, Write},
     path::Path,
     sync::{
-        mpsc::{self, Receiver, SyncSender, TrySendError},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc, Mutex,
     },
     thread,
@@ -28,7 +28,7 @@ use crate::plugin::{self, ytdlp, TrackInfo};
 use crate::storage::{track_record, HistorySortField, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
     draw, draw_history_browser, draw_startup, restore_terminal, setup_terminal, AppState,
-    HistoryPanelState, StartupScreenState, N_BANDS,
+    HistoryPanelState, StartupProgressState, StartupScreenState, N_BANDS,
 };
 
 pub struct PlaybackContext<'a> {
@@ -88,6 +88,7 @@ fn browse_history_session(
         status: "db migrations... teaching SQLite to keep a beat".to_string(),
         logs: startup_logs(),
         frame_count: 0,
+        progress: None,
         sync_warning: None,
     };
     title_state.set("looper — playlist history".to_string())?;
@@ -178,6 +179,10 @@ fn play_file_session(
         status: "db migrations... teaching SQLite to keep a beat".to_string(),
         logs: startup_logs(),
         frame_count: 0,
+        progress: Some(StartupProgressState {
+            label: "opening local history".to_string(),
+            progress: None,
+        }),
         sync_warning: None,
     };
     title_state.set("looper — booting".to_string())?;
@@ -187,12 +192,16 @@ fn play_file_session(
     startup.sync_warning = sync_warning.clone();
 
     loop {
-        startup.frame_count += 1;
-        startup.status = format!("loading song... bribing the aux cord for `{current_url}`");
-        title_state.set("looper — loading song".to_string())?;
-        terminal.draw(|frame| draw_startup(frame, &startup))?;
+        let resolved =
+            match resolve_url_with_startup(terminal, title_state, &mut startup, &current_url)? {
+                ResolveStartupOutcome::Resolved(resolved) => resolved,
+                ResolveStartupOutcome::Quit => {
+                    push_replica_best_effort(&storage);
+                    return Ok(());
+                }
+            };
 
-        let next = match plugin::resolve_url(&current_url)? {
+        let next = match resolved {
             None => play_tracks(
                 terminal,
                 title_state,
@@ -234,6 +243,65 @@ fn play_file_session(
             None => {
                 push_replica_best_effort(&storage);
                 return Ok(());
+            }
+        }
+    }
+}
+
+enum ResolveStartupOutcome {
+    Resolved(Option<Vec<TrackInfo>>),
+    Quit,
+}
+
+fn resolve_url_with_startup(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+    startup: &mut StartupScreenState,
+    current_url: &str,
+) -> Result<ResolveStartupOutcome> {
+    let (sender, receiver) = mpsc::channel();
+    let url = current_url.to_string();
+    thread::spawn(move || {
+        let result = plugin::resolve_url(&url).map_err(|err| err.to_string());
+        let _ = sender.send(result);
+    });
+
+    loop {
+        startup.frame_count += 1;
+        startup.status = format!(
+            "loading song... bribing the aux cord for `{}`",
+            truncate_title(current_url, 72)
+        );
+        startup.logs = startup_logs();
+        startup.progress = Some(StartupProgressState {
+            label: "resolving source".to_string(),
+            progress: None,
+        });
+        title_state.set("looper — loading song".to_string())?;
+        terminal.draw(|frame| draw_startup(frame, startup))?;
+
+        match receiver.try_recv() {
+            Ok(Ok(resolved)) => {
+                startup.progress = None;
+                return Ok(ResolveStartupOutcome::Resolved(resolved));
+            }
+            Ok(Err(message)) => return Err(color_eyre::eyre::eyre!(message)),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                return Err(color_eyre::eyre::eyre!(
+                    "remote resolver stopped before returning a result"
+                ));
+            }
+        }
+
+        if event::poll(Duration::from_millis(30))? {
+            if let Event::Key(key) = event::read()? {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        return Ok(ResolveStartupOutcome::Quit);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1214,18 +1282,15 @@ fn render_track_startup(
     sync_warning: Option<&SyncWarning>,
 ) -> Result<()> {
     title_state.set(format_loading_title(frame_count, &track.title))?;
-    let status = startup_status(
-        track,
-        track_index,
-        total_tracks,
-        is_playlist,
-        &phase,
-        progress,
-    );
+    let status = startup_status(track, track_index, total_tracks, is_playlist, &phase);
     let startup = StartupScreenState {
         status,
         logs: track_startup_logs(note),
         frame_count,
+        progress: Some(StartupProgressState {
+            label: loading_phase_label(&phase).to_string(),
+            progress,
+        }),
         sync_warning: sync_warning.cloned(),
     };
     terminal.draw(|frame| draw_startup(frame, &startup))?;
@@ -1238,7 +1303,6 @@ fn startup_status(
     total_tracks: usize,
     is_playlist: bool,
     phase: &LoadingPhase,
-    progress: Option<crate::download::DownloadProgress>,
 ) -> String {
     let position = if is_playlist {
         format!("track {track_index}/{total_tracks}")
@@ -1250,31 +1314,22 @@ fn startup_status(
 
     match phase {
         LoadingPhase::Resolving => format!("{position} • {service} • sizing up `{title}`"),
-        LoadingPhase::Downloading => {
-            let progress_label = progress
-                .map(|p| {
-                    let percent = p
-                        .fraction()
-                        .map(|f| format!("{}%", (f * 100.0).round() as u64))
-                        .unwrap_or_else(|| "warming up".to_string());
-                    let speed = p
-                        .speed_bytes_per_sec
-                        .map(human_speed)
-                        .unwrap_or_else(|| "--".to_string());
-                    let eta = p
-                        .eta_seconds
-                        .map(human_eta)
-                        .unwrap_or_else(|| "--:--".to_string());
-                    format!("{percent} • {speed} • eta {eta}")
-                })
-                .unwrap_or_else(|| "warming up".to_string());
-            format!("{position} • {service} • downloading `{title}` • {progress_label}")
-        }
+        LoadingPhase::Downloading => format!("{position} • {service} • downloading `{title}`"),
         LoadingPhase::Finalizing => format!("{position} • {service} • polishing `{title}`"),
         LoadingPhase::Ready => format!("{position} • {service} • cueing `{title}`"),
         LoadingPhase::Error(message) => {
             format!("{position} • {service} • {}", truncate_title(message, 48))
         }
+    }
+}
+
+fn loading_phase_label(phase: &LoadingPhase) -> &'static str {
+    match phase {
+        LoadingPhase::Resolving => "resolving source",
+        LoadingPhase::Downloading => "downloading audio",
+        LoadingPhase::Finalizing => "finalizing cache",
+        LoadingPhase::Ready => "cueing playback",
+        LoadingPhase::Error(_) => "download failed",
     }
 }
 
@@ -1284,38 +1339,6 @@ fn track_startup_logs(note: String) -> Vec<String> {
         "checking that the beat and the database remain legally married".to_string(),
         "keeping the stage curtains closed until audio is actually ready".to_string(),
     ]
-}
-
-fn human_speed(bytes_per_sec: u64) -> String {
-    format!("{}/s", human_bytes(bytes_per_sec))
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-fn human_eta(eta: u64) -> String {
-    let minutes = eta / 60;
-    let seconds = eta % 60;
-    if minutes >= 60 {
-        let hours = minutes / 60;
-        let minutes = minutes % 60;
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
 }
 
 fn format_playback_title(frame_count: u64, title: &str, paused: bool) -> String {

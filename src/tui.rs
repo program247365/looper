@@ -6,7 +6,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::download::CacheStatus;
+use crate::download::{CacheStatus, DownloadProgress};
 use crate::storage::{HistoryRow, HistorySortField, SyncWarning};
 
 pub const N_BANDS: usize = 32;
@@ -61,7 +61,14 @@ pub struct StartupScreenState {
     pub status: String,
     pub logs: Vec<String>,
     pub frame_count: u64,
+    pub progress: Option<StartupProgressState>,
     pub sync_warning: Option<SyncWarning>,
+}
+
+#[derive(Clone)]
+pub struct StartupProgressState {
+    pub label: String,
+    pub progress: Option<DownloadProgress>,
 }
 
 impl AppState {
@@ -115,10 +122,7 @@ pub fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
         Some(warning) => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(SYNC_WARNING_HEIGHT),
-                    Constraint::Min(0),
-                ])
+                .constraints([Constraint::Length(SYNC_WARNING_HEIGHT), Constraint::Min(0)])
                 .split(frame.area());
             draw_sync_warning(frame, chunks[0], warning);
             chunks[1]
@@ -137,7 +141,11 @@ pub fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     }
 }
 
-fn draw_sync_warning(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, warning: &SyncWarning) {
+fn draw_sync_warning(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    warning: &SyncWarning,
+) {
     let label_style = Style::default()
         .fg(Color::Rgb(255, 200, 90))
         .add_modifier(Modifier::BOLD);
@@ -188,26 +196,35 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
         Some(warning) => {
             let split = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(SYNC_WARNING_HEIGHT),
-                    Constraint::Min(0),
-                ])
+                .constraints([Constraint::Length(SYNC_WARNING_HEIGHT), Constraint::Min(0)])
                 .split(frame.area());
             draw_sync_warning(frame, split[0], warning);
             split[1]
         }
         None => frame.area(),
     };
+
+    let panel_width = if area.width > 4 {
+        area.width - 4
+    } else {
+        area.width
+    }
+    .min(118);
+    let panel = centered_area(area, panel_width, 22);
+    let panel_block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Rgb(60, 60, 80)));
+    let panel_inner = panel_block.inner(panel);
+    frame.render_widget(panel_block, panel);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),
-            Constraint::Length(16),
-            Constraint::Length(2),
-            Constraint::Length(5),
+            Constraint::Length(7),
+            Constraint::Length(if state.progress.is_some() { 6 } else { 4 }),
             Constraint::Min(0),
         ])
-        .split(area);
+        .split(panel_inner);
 
     let title = vec![
         Line::from("  _                                   .-''''-.    .-''''-. "),
@@ -224,36 +241,233 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
                 .fg(Color::Rgb(255, 180, 80))
                 .add_modifier(Modifier::BOLD),
         ),
-        chunks[1],
+        chunks[0],
     );
 
-    let spinner = spinner_frame(state.frame_count);
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(vec![
-            Span::styled(
-                format!("{spinner} "),
-                Style::default().fg(Color::Rgb(120, 220, 80)),
-            ),
-            Span::styled(&state.status, Style::default().fg(Color::White)),
-        ])])
-        .alignment(Alignment::Center),
-        chunks[2],
-    );
+    draw_startup_status(frame, chunks[1], state);
 
     let log_lines = state
         .logs
         .iter()
         .map(|line| {
             Line::from(vec![
-                Span::styled("• ", Style::default().fg(Color::Rgb(255, 160, 50))),
+                Span::raw("  "),
+                Span::styled("•", Style::default().fg(Color::Rgb(255, 160, 50))),
+                Span::raw("  "),
                 Span::styled(line, Style::default().fg(Color::Rgb(180, 180, 200))),
             ])
         })
         .collect::<Vec<_>>();
+
+    let logs_block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Rgb(40, 40, 60)));
     frame.render_widget(
-        Paragraph::new(log_lines).alignment(Alignment::Center),
-        chunks[3],
+        Paragraph::new(log_lines)
+            .block(logs_block)
+            .alignment(Alignment::Left),
+        chunks[2],
     );
+}
+
+fn draw_startup_status(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &StartupScreenState,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Rgb(60, 60, 80)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let spinner = spinner_frame(state.frame_count);
+    let status = Line::from(vec![
+        Span::styled(
+            format!("{spinner} "),
+            Style::default().fg(Color::Rgb(120, 220, 80)),
+        ),
+        Span::styled(&state.status, Style::default().fg(Color::White)),
+    ]);
+
+    let rows = if state.progress.is_some() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner)
+    };
+
+    frame.render_widget(Paragraph::new(vec![status]), rows[0]);
+
+    if let Some(progress) = &state.progress {
+        frame.render_widget(
+            Paragraph::new(vec![startup_progress_bar_line(
+                rows[1].width,
+                progress,
+                state.frame_count,
+            )]),
+            rows[1],
+        );
+        frame.render_widget(
+            Paragraph::new(vec![startup_progress_detail_line(progress)])
+                .alignment(Alignment::Center),
+            rows[2],
+        );
+    }
+}
+
+fn startup_progress_bar_line(
+    width: u16,
+    progress: &StartupProgressState,
+    frame_count: u64,
+) -> Line<'static> {
+    let width = width as usize;
+    if width == 0 {
+        return Line::from("");
+    }
+
+    let fraction = progress
+        .progress
+        .as_ref()
+        .and_then(DownloadProgress::fraction);
+    let track = match fraction {
+        Some(fraction) => determinate_track(width, fraction),
+        None => indeterminate_track(width, frame_count),
+    };
+
+    Line::from(vec![Span::styled(
+        track,
+        Style::default().fg(Color::Rgb(255, 160, 50)),
+    )])
+    .alignment(Alignment::Center)
+}
+
+fn determinate_track(width: usize, fraction: f64) -> String {
+    let filled = (fraction.clamp(0.0, 1.0) * width as f64).round() as usize;
+    (0..width)
+        .map(|i| {
+            if i + 1 == filled.max(1) {
+                PROGRESS_KNOB
+            } else if i < filled {
+                '━'
+            } else {
+                '─'
+            }
+        })
+        .collect()
+}
+
+fn indeterminate_track(width: usize, frame_count: u64) -> String {
+    let window = (width / 5).clamp(4, 18).min(width);
+    let travel = width + window;
+    let head = ((frame_count / 2) as usize) % travel;
+
+    (0..width)
+        .map(|i| {
+            let visible = head >= i && head - i < window;
+            if visible {
+                '━'
+            } else {
+                '─'
+            }
+        })
+        .collect()
+}
+
+fn startup_progress_detail_line(progress: &StartupProgressState) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        progress.label.clone(),
+        Style::default().fg(Color::Rgb(180, 180, 200)),
+    )];
+
+    if let Some(progress) = &progress.progress {
+        if let Some(fraction) = progress.fraction() {
+            spans.push(Span::styled(
+                format!("  {}%", (fraction * 100.0).round() as u64),
+                Style::default()
+                    .fg(Color::Rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        if let Some(downloaded) = progress.downloaded_bytes {
+            let total = progress
+                .total_bytes
+                .map(format_loading_bytes)
+                .unwrap_or_else(|| "--".to_string());
+            spans.push(Span::styled(
+                format!("  {} / {total}", format_loading_bytes(downloaded)),
+                Style::default().fg(Color::Rgb(150, 150, 170)),
+            ));
+        }
+
+        if let Some(speed) = progress.speed_bytes_per_sec {
+            spans.push(Span::styled(
+                format!("  {}/s", format_loading_bytes(speed)),
+                Style::default().fg(Color::Rgb(150, 150, 170)),
+            ));
+        }
+
+        if let Some(eta) = progress.eta_seconds {
+            spans.push(Span::styled(
+                format!("  eta {}", format_loading_eta(eta)),
+                Style::default().fg(Color::Rgb(150, 150, 170)),
+            ));
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn format_loading_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn format_loading_eta(eta: u64) -> String {
+    let minutes = eta / 60;
+    let seconds = eta % 60;
+    if minutes >= 60 {
+        let hours = minutes / 60;
+        let minutes = minutes % 60;
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn centered_area(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 pub fn draw_history_browser(
@@ -266,10 +480,7 @@ pub fn draw_history_browser(
         Some(warning) => {
             let split = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(SYNC_WARNING_HEIGHT),
-                    Constraint::Min(0),
-                ])
+                .constraints([Constraint::Length(SYNC_WARNING_HEIGHT), Constraint::Min(0)])
                 .split(frame.area());
             draw_sync_warning(frame, split[0], warning);
             split[1]
@@ -1109,6 +1320,7 @@ mod tests {
             status: "loading".into(),
             logs: vec!["warming up".into()],
             frame_count: 0,
+            progress: None,
             sync_warning: Some(sample_warning()),
         };
         terminal.draw(|frame| draw_startup(frame, &state)).unwrap();
@@ -1143,9 +1355,40 @@ mod tests {
             status: "loading".into(),
             logs: vec!["warming up".into()],
             frame_count: 0,
+            progress: None,
             sync_warning: None,
         };
         terminal.draw(|frame| draw_startup(frame, &state)).unwrap();
         assert!(!buffer_contains(&terminal, "History sync disabled"));
+    }
+
+    #[test]
+    fn startup_renders_download_progress() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = StartupScreenState {
+            status: "single track • YouTube • downloading `song`".into(),
+            logs: vec![
+                "teaching bytes to moonwalk into the cache".into(),
+                "keeping the stage curtains closed until audio is actually ready".into(),
+            ],
+            frame_count: 12,
+            progress: Some(StartupProgressState {
+                label: "downloading audio".into(),
+                progress: Some(DownloadProgress {
+                    downloaded_bytes: Some(1_048_576),
+                    total_bytes: Some(4_194_304),
+                    speed_bytes_per_sec: Some(524_288),
+                    eta_seconds: Some(6),
+                }),
+            }),
+            sync_warning: None,
+        };
+        terminal.draw(|frame| draw_startup(frame, &state)).unwrap();
+        assert!(buffer_contains(&terminal, "downloading audio"));
+        assert!(buffer_contains(&terminal, "25%"));
+        assert!(buffer_contains(&terminal, "1.0 MB / 4.0 MB"));
+        assert!(buffer_contains(&terminal, "512.0 KB/s"));
+        assert!(buffer_contains(&terminal, "eta 0:06"));
     }
 }
