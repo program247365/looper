@@ -1,5 +1,6 @@
 use color_eyre::eyre::{Result, WrapErr};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::source::SeekError;
+use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
@@ -41,12 +42,12 @@ fn stream_storage_with_buffer(
 
 /// Wraps a Source and copies every sample into a shared ring buffer.
 /// Uses try_lock so the audio thread never blocks waiting for the main thread.
-pub struct SampleTap<S: Source<Item = f32>> {
+pub struct SampleTap<S: Source> {
     inner: S,
     buf: Arc<Mutex<VecDeque<f32>>>,
 }
 
-impl<S: Source<Item = f32>> Iterator for SampleTap<S> {
+impl<S: Source> Iterator for SampleTap<S> {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
@@ -61,26 +62,29 @@ impl<S: Source<Item = f32>> Iterator for SampleTap<S> {
     }
 }
 
-impl<S: Source<Item = f32>> Source for SampleTap<S> {
-    fn current_frame_len(&self) -> Option<usize> {
-        self.inner.current_frame_len()
+impl<S: Source> Source for SampleTap<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
     }
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> ChannelCount {
         self.inner.channels()
     }
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> SampleRate {
         self.inner.sample_rate()
     }
     fn total_duration(&self) -> Option<Duration> {
         self.inner.total_duration()
     }
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(pos)
+    }
 }
 
 pub struct AudioPlayer {
-    _stream: OutputStream,
-    _stream_handle: OutputStreamHandle,
+    // Owns the OS audio output; dropping it stops playback, so keep it alive.
+    _device: MixerDeviceSink,
     _download_runtime: Option<Runtime>,
-    pub sink: Sink,
+    pub sink: Player,
     pub duration: Option<Duration>,
     pub sample_buf: Arc<Mutex<VecDeque<f32>>>,
     pub sample_rate: u32,
@@ -95,15 +99,15 @@ impl<T: Read + Seek + Send + Sync> MediaReader for T {}
 
 impl AudioPlayer {
     pub fn new(input: PlaybackInput, repeat: bool) -> Result<Self> {
-        let (stream, handle) =
-            OutputStream::try_default().wrap_err("failed to open audio output device")?;
-        let sink = Sink::try_new(&handle).wrap_err("failed to create audio sink")?;
+        let device = DeviceSinkBuilder::open_default_sink()
+            .wrap_err("failed to open audio output device")?;
+        let sink = Player::connect_new(device.mixer());
 
-        let (reader, duration, runtime) = open_input(&input)?;
-        let source = decode_input(reader, &input)?.convert_samples::<f32>();
+        let (reader, duration, runtime, byte_len) = open_input(&input)?;
+        let source = decode_input(reader, byte_len)?;
 
-        let sample_rate = source.sample_rate();
-        let channels = source.channels();
+        let sample_rate = source.sample_rate().get();
+        let channels = source.channels().get();
 
         // File-backed sources can be cheaply re-opened from disk, so we play
         // them once and refill the sink on each loop boundary instead of using
@@ -127,8 +131,7 @@ impl AudioPlayer {
         }
 
         Ok(Self {
-            _stream: stream,
-            _stream_handle: handle,
+            _device: device,
             _download_runtime: runtime,
             sink,
             duration,
@@ -157,21 +160,18 @@ impl AudioPlayer {
             return Ok(false);
         }
 
-        let (reader, _, _) = open_input(&self.input)?;
-        let source = decode_input(reader, &self.input)?
-            .convert_samples::<f32>()
-            .skip_duration(position);
-        let tapped = SampleTap {
-            inner: source,
-            buf: self.sample_buf.clone(),
-        };
-
-        self.sink.stop();
-        self.sink.append(tapped);
-        if let Ok(mut buf) = self.sample_buf.lock() {
-            buf.clear();
+        // True seek: jumps to the target packet via symphonia without re-decoding
+        // from the start. Blocks ~0-5ms even when paused. On any seek failure we
+        // report no-op rather than disrupt playback.
+        match self.sink.try_seek(position) {
+            Ok(()) => {
+                if let Ok(mut buf) = self.sample_buf.lock() {
+                    buf.clear();
+                }
+                Ok(true)
+            }
+            Err(_) => Ok(false),
         }
-        Ok(true)
     }
 
     /// If this player loops a file-backed source and the sink has drained,
@@ -181,8 +181,8 @@ impl AudioPlayer {
         if !self.refillable || !self.sink.empty() {
             return Ok(false);
         }
-        let (reader, _, _) = open_input(&self.input)?;
-        let source = decode_input(reader, &self.input)?.convert_samples::<f32>();
+        let (reader, _, _, byte_len) = open_input(&self.input)?;
+        let source = decode_input(reader, byte_len)?;
         let tapped = SampleTap {
             inner: source,
             buf: self.sample_buf.clone(),
@@ -194,15 +194,20 @@ impl AudioPlayer {
 
 fn decode_input(
     reader: Box<dyn MediaReader>,
-    _input: &PlaybackInput,
+    byte_len: Option<u64>,
 ) -> Result<Decoder<BufReader<Box<dyn MediaReader>>>> {
     let reader = BufReader::new(reader);
-    Decoder::new(reader).wrap_err("failed to decode audio")
+    let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
+    // Byte length lets symphonia seek accurately in VBR files (e.g. long MP3s).
+    if let Some(len) = byte_len {
+        builder = builder.with_byte_len(len);
+    }
+    builder.build().wrap_err("failed to decode audio")
 }
 
 fn open_input(
     input: &PlaybackInput,
-) -> Result<(Box<dyn MediaReader>, Option<Duration>, Option<Runtime>)> {
+) -> Result<(Box<dyn MediaReader>, Option<Duration>, Option<Runtime>, Option<u64>)> {
     match input {
         PlaybackInput::File(path) => {
             let path_str = path.to_string_lossy();
@@ -213,7 +218,8 @@ fn open_input(
                 .or_else(|| probe_duration_symphonia(&path_str));
 
             let file = File::open(path).wrap_err("failed to open audio file")?;
-            Ok((Box::new(file), duration, None))
+            let byte_len = file.metadata().ok().map(|m| m.len());
+            Ok((Box::new(file), duration, None, byte_len))
         }
         PlaybackInput::HttpStream { url, headers } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -235,7 +241,7 @@ fn open_input(
                         .wrap_err("failed to open HTTP audio stream")
                 })
                 .wrap_err("failed to open HTTP audio stream")?;
-            Ok((Box::new(reader), None, Some(runtime)))
+            Ok((Box::new(reader), None, Some(runtime), None))
         }
         PlaybackInput::ProcessStdout {
             program,
@@ -263,7 +269,7 @@ fn open_input(
                     .wrap_err("failed to open process audio stream")
                 })
                 .wrap_err("failed to open process audio stream")?;
-            Ok((Box::new(reader), None, Some(runtime)))
+            Ok((Box::new(reader), None, Some(runtime), None))
         }
     }
 }
@@ -331,6 +337,29 @@ mod tests {
     use std::io::{Read, Write};
     use stream_download::storage::adaptive::{AdaptiveStorageReader, AdaptiveStorageWriter};
     use stream_download::storage::StorageProvider;
+
+    #[test]
+    #[ignore = "requires a real audio output device"]
+    fn seek_on_local_file_is_true_seek() {
+        use crate::playback_input::PlaybackInput;
+        use std::time::{Duration, Instant};
+
+        let input = PlaybackInput::file("tests/fixtures/sound.mp3");
+        let player = super::AudioPlayer::new(input, true).expect("player should initialize");
+        assert!(player.duration.is_some(), "duration should be probed");
+
+        // A true seek returns promptly (~ms). The old skip_duration path would
+        // decode-and-discard from zero; this guards against regressing to it.
+        let start = Instant::now();
+        let seeked = player
+            .seek_to(Duration::from_millis(500))
+            .expect("seek should not error");
+        assert!(seeked, "local file seek should report success");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "true seek must not block on a full decode"
+        );
+    }
 
     #[test]
     fn unknown_length_stream_storage_is_bounded() {

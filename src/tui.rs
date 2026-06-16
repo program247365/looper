@@ -1,6 +1,7 @@
 use chrono::{Local, TimeZone};
 use color_eyre::eyre::Result;
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -46,6 +47,24 @@ pub struct AppState {
     pub sync_warning: Option<SyncWarning>,
     pub thumbnail: Option<StatefulProtocol>,
     pub is_live: bool,
+    /// Geometry of the playback progress bar from the most recent render, used
+    /// to map mouse clicks/drags onto a seek position. `None` when no bar is on
+    /// screen (e.g. fullscreen visualizer).
+    pub progress_track: Option<ProgressTrack>,
+    /// Position the user is dragging the knob toward, shown as a preview while
+    /// scrubbing. The actual `seek_to` is deferred until the mouse is released,
+    /// so a drag does one decode instead of dozens. `None` when not scrubbing.
+    pub scrub_preview: Option<Duration>,
+}
+
+/// Clickable region of the rendered progress bar. The track spans columns
+/// `[track_x, track_x + track_width)` across rows `[top, bottom]` (inclusive).
+#[derive(Clone, Copy)]
+pub struct ProgressTrack {
+    pub track_x: u16,
+    pub track_width: u16,
+    pub top: u16,
+    pub bottom: u16,
 }
 
 #[derive(Clone)]
@@ -85,7 +104,7 @@ impl AppState {
 pub fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, Option<Picker>)> {
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     let terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     // Picker selection. Defaults to halfblocks because protocol auto-detection
@@ -108,7 +127,11 @@ pub fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, Option<Pi
 
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     Ok(())
 }
 
@@ -118,6 +141,9 @@ const SYNC_WARNING_HEIGHT: u16 = 7;
 
 pub fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     frame.render_widget(Clear, frame.area());
+    // Cleared each frame; `draw_progress` re-records it only when the bar is
+    // actually drawn, so fullscreen mode leaves no stale clickable region.
+    state.progress_track = None;
     let body_area = match state.sync_warning.as_ref() {
         Some(warning) => {
             let chunks = Layout::default()
@@ -896,8 +922,10 @@ fn gaussian(x: f32, center: f32, width: f32) -> f32 {
 
 // ── Progress bar ──────────────────────────────────────────────────────────────
 
-fn draw_progress(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
-    let elapsed = state.elapsed();
+fn draw_progress(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &mut AppState) {
+    // While scrubbing, show where the knob is being dragged rather than the
+    // still-playing position, so the bar tracks the cursor with no audio work.
+    let elapsed = state.scrub_preview.unwrap_or_else(|| state.elapsed());
 
     let time_label = match state.duration {
         Some(dur) if dur.as_secs() > 0 => {
@@ -925,6 +953,18 @@ fn draw_progress(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
     // Reserve right side for the time label
     let label_len = time_label.len() as u16;
     let track_width = inner.width.saturating_sub(label_len) as usize;
+
+    // Record the clickable track region for mouse seeking. Use the full
+    // bordered height (`area`) as the vertical hit zone so the 1-row track is
+    // easy to grab, but map horizontally against the inner track columns only.
+    if track_width > 0 {
+        state.progress_track = Some(ProgressTrack {
+            track_x: inner.x,
+            track_width: track_width as u16,
+            top: area.y,
+            bottom: area.y + area.height.saturating_sub(1),
+        });
+    }
 
     let ratio = match state.duration {
         Some(dur) if dur.as_secs_f64() > 0.0 => {
