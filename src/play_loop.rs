@@ -1,6 +1,9 @@
 use color_eyre::eyre::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, LeaveAlternateScreen},
 };
@@ -28,7 +31,7 @@ use crate::plugin::{self, ytdlp, TrackInfo};
 use crate::storage::{track_record, HistorySortField, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
     draw, draw_history_browser, draw_startup, restore_terminal, setup_terminal, AppState,
-    HistoryPanelState, StartupProgressState, StartupScreenState, N_BANDS,
+    HistoryPanelState, ProgressTrack, StartupProgressState, StartupScreenState, N_BANDS,
 };
 
 const SEEK_STEP: Duration = Duration::from_secs(5);
@@ -69,7 +72,7 @@ where
     let orig_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
         orig_hook(info);
     }));
 
@@ -384,19 +387,31 @@ fn run_loop(
         }
 
         if event::poll(Duration::from_millis(30))? {
-            if let Event::Key(key) = event::read()? {
-                let cmd = handle_key_event(key, state);
-                if let Some(action) = dispatch_command(
-                    cmd,
-                    state,
-                    player,
-                    track,
-                    &storage,
-                    &mut needs_render,
-                    ctx.media.as_ref(),
-                )? {
-                    return Ok(action);
+            match event::read()? {
+                Event::Key(key) => {
+                    let cmd = handle_key_event(key, state);
+                    if let Some(action) = dispatch_command(
+                        cmd,
+                        state,
+                        player,
+                        track,
+                        &storage,
+                        &mut needs_render,
+                        ctx.media.as_ref(),
+                    )? {
+                        return Ok(action);
+                    }
                 }
+                Event::Mouse(mouse) => {
+                    handle_mouse_event(
+                        mouse,
+                        state,
+                        player,
+                        &mut needs_render,
+                        ctx.media.as_ref(),
+                    )?;
+                }
+                _ => {}
             }
         }
 
@@ -637,6 +652,72 @@ fn set_elapsed(state: &mut AppState, elapsed: Duration) {
     } else {
         state.loop_start = Instant::now() - elapsed;
     }
+}
+
+/// Scrub the progress bar with the mouse. Pressing or dragging only moves a
+/// preview knob (no audio work); the single, expensive `seek_to` is deferred
+/// until release. `skip_duration` decodes from the start of the file, so doing
+/// it per drag event floods and stalls the decoder — releasing once does not.
+fn handle_mouse_event(
+    mouse: MouseEvent,
+    state: &mut AppState,
+    player: &AudioPlayer,
+    needs_render: &mut bool,
+    media: Option<&MediaSessionHandle>,
+) -> Result<()> {
+    let Some(duration) = state.duration else {
+        return Ok(());
+    };
+
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(track) = state.progress_track else {
+                return Ok(());
+            };
+            if mouse.row >= track.top
+                && mouse.row <= track.bottom
+                && mouse.column >= track.track_x
+                && mouse.column < track.track_x + track.track_width
+            {
+                state.scrub_preview = Some(seek_target_for_column(mouse.column, track, duration));
+                *needs_render = true;
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            // Only follow drags that began on the bar. Clamp the column so
+            // dragging past either end pins the preview to start/end.
+            if state.scrub_preview.is_some() {
+                if let Some(track) = state.progress_track {
+                    let max_col = track.track_x + track.track_width.saturating_sub(1);
+                    let col = mouse.column.clamp(track.track_x, max_col);
+                    state.scrub_preview = Some(seek_target_for_column(col, track, duration));
+                    *needs_render = true;
+                }
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(target) = state.scrub_preview.take() {
+                if player.seek_to(target)? {
+                    set_elapsed(state, target);
+                    if let Some(media) = media {
+                        media.set_playback(state.paused, state.elapsed());
+                    }
+                }
+                *needs_render = true;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Map a click column to a playback position. The leftmost track column is the
+/// start of the track and the rightmost is the end.
+fn seek_target_for_column(column: u16, track: ProgressTrack, duration: Duration) -> Duration {
+    let offset = column.saturating_sub(track.track_x);
+    let span = track.track_width.saturating_sub(1).max(1);
+    let ratio = (offset.min(span) as f64 / span as f64).clamp(0.0, 1.0);
+    duration.mul_f64(ratio)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1057,6 +1138,8 @@ fn play_single_track(
         sync_warning: sync_warning.cloned(),
         thumbnail,
         is_live: track.is_live,
+        progress_track: None,
+        scrub_preview: None,
     };
 
     if let Some(media) = &ctx.media {
@@ -1481,6 +1564,8 @@ mod tests {
             sync_warning: None,
             thumbnail: None,
             is_live: false,
+            progress_track: None,
+            scrub_preview: None,
         }
     }
 
@@ -1530,6 +1615,38 @@ mod tests {
         assert_eq!(
             seek_target(Duration::from_secs(28), SeekDirection::Forward, None),
             Duration::from_secs(33)
+        );
+    }
+
+    #[test]
+    fn mouse_column_maps_across_track() {
+        // Track occupies columns [2, 12), so span = width - 1 = 10 columns.
+        let track = ProgressTrack {
+            track_x: 2,
+            track_width: 11,
+            top: 5,
+            bottom: 7,
+        };
+        let duration = Duration::from_secs(100);
+
+        // Leftmost column is the start.
+        assert_eq!(
+            seek_target_for_column(2, track, duration),
+            Duration::from_secs(0)
+        );
+        // Midpoint.
+        assert_eq!(
+            seek_target_for_column(7, track, duration),
+            Duration::from_secs(50)
+        );
+        // Rightmost column is the end, and anything past it clamps to the end.
+        assert_eq!(
+            seek_target_for_column(12, track, duration),
+            Duration::from_secs(100)
+        );
+        assert_eq!(
+            seek_target_for_column(99, track, duration),
+            Duration::from_secs(100)
         );
     }
 

@@ -223,14 +223,15 @@ Or just don't set it. Looper falls back to local-only without complaint.
 | `Enter` | Replay the selected track from the default history browser |
 | `Space` | Pause / Resume |
 | `Left` / `Right` | Seek backward / forward 5 seconds |
+| Click / drag progress bar | Scrub to any position (commits on release) |
 | `f` | Toggle fullscreen visualizer |
 | `s` | Toggle favorite for the currently playing track |
 | `p` | Toggle the played-songs panel |
 | `Cmd-P` | Attempt to toggle the played-songs panel when the terminal forwards the modifier |
 | `q` / `Ctrl-C` | Quit |
 
-Seeking is available for local files and cached downloads. Live or stream-first
-sources ignore the arrow keys.
+Seeking (arrow keys or progress-bar drag) is available for local files and
+cached downloads. Live or stream-first sources ignore seek input.
 
 ### Played-Songs Panel
 
