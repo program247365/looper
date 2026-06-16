@@ -99,8 +99,12 @@ impl<T: Read + Seek + Send + Sync> MediaReader for T {}
 
 impl AudioPlayer {
     pub fn new(input: PlaybackInput, repeat: bool) -> Result<Self> {
-        let device = DeviceSinkBuilder::open_default_sink()
+        let mut device = DeviceSinkBuilder::open_default_sink()
             .wrap_err("failed to open audio output device")?;
+        // rodio prints "Dropping DeviceSink, audio playing through this sink
+        // will stop" to stderr on drop, which leaks onto the TUI's alternate
+        // screen whenever an AudioPlayer is torn down (track/loop transitions).
+        device.log_on_drop(false);
         let sink = Player::connect_new(device.mixer());
 
         let (reader, duration, runtime, byte_len) = open_input(&input)?;
