@@ -30,8 +30,8 @@ use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, ytdlp, TrackInfo};
 use crate::storage::{track_record, HistorySortField, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
-    draw, draw_history_browser, draw_startup, restore_terminal, setup_terminal, AppState,
-    HistoryPanelState, ProgressTrack, StartupProgressState, StartupScreenState, N_BANDS,
+    draw, draw_history_browser, draw_replay_error, draw_startup, restore_terminal, setup_terminal,
+    AppState, HistoryPanelState, ProgressTrack, StartupProgressState, StartupScreenState, N_BANDS,
 };
 
 const SEEK_STEP: Duration = Duration::from_secs(5);
@@ -49,7 +49,7 @@ pub fn browse_history(ctx: PlaybackContext) -> Result<()> {
 
 pub fn play_file(url: &str, ctx: PlaybackContext) -> Result<()> {
     run_terminal_session(|terminal, title_state, picker| {
-        play_file_session(terminal, title_state, url, &ctx, picker)
+        play_file_session(terminal, title_state, url, &ctx, picker).map(|_| ())
     })
 }
 
@@ -150,13 +150,18 @@ fn browse_history_session(
                     }
                     KeyCommand::HistoryReplay => {
                         if let Some(row) = panel.rows.get(panel.selected) {
-                            return play_file_session(
-                                terminal,
-                                title_state,
-                                &row.replay_target,
-                                ctx,
-                                picker,
-                            );
+                            let target = row.replay_target.clone();
+                            match play_file_session(
+                                terminal, title_state, &target, ctx, picker,
+                            )? {
+                                SessionOutcome::Quit => {
+                                    push_replica_best_effort(&storage);
+                                    return Ok(());
+                                }
+                                SessionOutcome::BackToHistory => {
+                                    refresh_history_panel(&mut panel, &storage)?;
+                                }
+                            }
                         }
                     }
                     KeyCommand::None
@@ -180,7 +185,7 @@ fn play_file_session(
     initial_url: &str,
     ctx: &PlaybackContext,
     picker: Option<&Picker>,
-) -> Result<()> {
+) -> Result<SessionOutcome> {
     let mut current_url = initial_url.to_string();
     let mut startup = StartupScreenState {
         status: "db migrations... teaching SQLite to keep a beat".to_string(),
@@ -204,7 +209,12 @@ fn play_file_session(
                 ResolveStartupOutcome::Resolved(resolved) => resolved,
                 ResolveStartupOutcome::Quit => {
                     push_replica_best_effort(&storage);
-                    return Ok(());
+                    return Ok(SessionOutcome::Quit);
+                }
+                ResolveStartupOutcome::Failed(_message) => {
+                    handle_unresolvable_replay(terminal, title_state, &storage, &current_url)?;
+                    push_replica_best_effort(&storage);
+                    return Ok(SessionOutcome::BackToHistory);
                 }
             };
 
@@ -249,15 +259,62 @@ fn play_file_session(
             Some(replay_target) => current_url = replay_target,
             None => {
                 push_replica_best_effort(&storage);
-                return Ok(());
+                return Ok(SessionOutcome::Quit);
             }
         }
     }
 }
 
+/// Why a `play_file_session` returned, so its caller knows whether to quit the
+/// app or fall back to the history browser (e.g. after a dead replay target).
+enum SessionOutcome {
+    Quit,
+    BackToHistory,
+}
+
 enum ResolveStartupOutcome {
     Resolved(Option<Vec<TrackInfo>>),
     Quit,
+    /// The remote resolver reported the URL is unplayable (private, removed,
+    /// region-locked, expired live stream). Recoverable: surface it in the TUI
+    /// instead of crashing the whole app.
+    Failed(String),
+}
+
+/// Shows a non-fatal modal when a history entry can't be resolved, and lets the
+/// user prune the dead row with `d`. Returns once the user dismisses it.
+fn handle_unresolvable_replay(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+    storage: &SharedStorage,
+    replay_target: &str,
+) -> Result<()> {
+    let title = storage
+        .lock()
+        .unwrap()
+        .title_for_replay_target(replay_target)?
+        .unwrap_or_else(|| replay_target.to_string());
+    let title = truncate_title(&title, 60);
+    let detail = "This video may be private, removed, or region-locked.";
+    title_state.set("looper — track unavailable".to_string())?;
+
+    loop {
+        terminal.draw(|frame| draw_replay_error(frame, &title, detail))?;
+        if event::poll(Duration::from_millis(30))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('d') | KeyCode::Char('D') => {
+                        storage
+                            .lock()
+                            .unwrap()
+                            .delete_by_replay_target(replay_target)?;
+                        return Ok(());
+                    }
+                    _ => return Ok(()),
+                }
+            }
+        }
+    }
 }
 
 fn resolve_url_with_startup(
@@ -292,7 +349,7 @@ fn resolve_url_with_startup(
                 startup.progress = None;
                 return Ok(ResolveStartupOutcome::Resolved(resolved));
             }
-            Ok(Err(message)) => return Err(color_eyre::eyre::eyre!(message)),
+            Ok(Err(message)) => return Ok(ResolveStartupOutcome::Failed(message)),
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 return Err(color_eyre::eyre::eyre!(

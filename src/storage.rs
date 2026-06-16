@@ -330,6 +330,29 @@ impl Storage {
             .unwrap_or(false);
         Ok(favorite)
     }
+
+    pub fn title_for_replay_target(&self, replay_target: &str) -> Result<Option<String>> {
+        use crate::schema::played_tracks::dsl as tracks;
+
+        let mut connection = establish_connection(&self.db_path)?;
+        let title = tracks::played_tracks
+            .filter(tracks::replay_target.eq(replay_target))
+            .select(tracks::title)
+            .first::<String>(&mut connection)
+            .optional()?;
+        Ok(title)
+    }
+
+    pub fn delete_by_replay_target(&self, replay_target: &str) -> Result<usize> {
+        use crate::schema::played_tracks::dsl as tracks;
+
+        let mut connection = establish_connection(&self.db_path)?;
+        let removed = diesel::delete(
+            tracks::played_tracks.filter(tracks::replay_target.eq(replay_target)),
+        )
+        .execute(&mut connection)?;
+        Ok(removed)
+    }
 }
 
 fn compare_history_rows(
@@ -602,6 +625,39 @@ mod tests {
             .list_history(HistorySortField::LastPlayed, false)
             .unwrap();
         assert!(!rows[0].last_played_computer.is_empty());
+    }
+
+    #[test]
+    fn delete_by_replay_target_prunes_dead_entry() {
+        let (_dir, storage) = test_storage();
+        let record = TrackRecord {
+            track_key: "yt:YmQ7jRgf4f0".into(),
+            replay_target: "https://www.youtube.com/watch?v=YmQ7jRgf4f0".into(),
+            title: "Claude FM 06-11".into(),
+            platform: "YouTube".into(),
+        };
+        storage.record_play(&record).unwrap();
+
+        assert_eq!(
+            storage
+                .title_for_replay_target(&record.replay_target)
+                .unwrap()
+                .as_deref(),
+            Some("Claude FM 06-11")
+        );
+
+        let removed = storage
+            .delete_by_replay_target(&record.replay_target)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(storage
+            .title_for_replay_target(&record.replay_target)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .list_history(HistorySortField::LastPlayed, false)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

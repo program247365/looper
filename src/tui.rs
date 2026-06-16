@@ -492,6 +492,55 @@ fn centered_area(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+pub fn draw_replay_error(frame: &mut ratatui::Frame, title: &str, detail: &str) {
+    frame.render_widget(Clear, frame.area());
+    let area = centered_area(frame.area(), 66, 9);
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "⚠  Couldn't play this track",
+            Style::default()
+                .fg(Color::Rgb(255, 120, 100))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(Color::Rgb(230, 230, 240))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            detail.to_string(),
+            Style::default().fg(Color::Rgb(170, 170, 190)),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[d]",
+                Style::default()
+                    .fg(Color::Rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " remove from history    ",
+                Style::default().fg(Color::Rgb(150, 150, 170)),
+            ),
+            Span::styled(
+                "[any key]",
+                Style::default()
+                    .fg(Color::Rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" back", Style::default().fg(Color::Rgb(150, 150, 170))),
+        ]),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" track unavailable ")
+        .style(Style::default().fg(Color::Rgb(170, 90, 90)));
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 pub fn draw_history_browser(
     frame: &mut ratatui::Frame,
     panel: &HistoryPanelState,
