@@ -141,6 +141,12 @@ There are now two major UI modes:
   - progress bar
   - footer / micro-status
   - optional compact cache badge like `CACHE 42%`
+- history browser (`browse_history_session`) — the landing screen when `looper`
+  is run with no `--url`; also reachable mid-playback via the `p` overlay. `enter`
+  replays the selected row.
+- "track unavailable" modal (`draw_replay_error`) — non-fatal overlay shown when
+  a replay target can't be resolved; `d` prunes the dead row, any other key
+  returns to the history browser.
 
 ### Playlist behavior
 
@@ -166,6 +172,13 @@ There are now two major UI modes:
 - per-band AGC keeps the scatter visualizer lively across different mixes
 - YouTube currently favors reliability over immediacy: cached download-first instead of direct stream-first
 - remote loading is presented in-TUI instead of as plain stderr logging
+- an unresolvable replay target (private/removed/region-locked/expired live
+  stream) is **not** fatal: `resolve_url_with_startup` returns
+  `ResolveStartupOutcome::Failed`, `play_file_session` shows the "track
+  unavailable" modal, and replay from the history browser returns to the list
+  (`SessionOutcome::BackToHistory`) rather than exiting. Quitting playback with
+  `q` still exits the app (`SessionOutcome::Quit`). This is intentional — a
+  "jukebox historian" accumulates links that inevitably rot.
 - `souvlaki` is wired with the `use_zbus` feature so Linux builds don't need `libdbus-1-dev`; macOS uses `MPRemoteCommandCenter` + `MPNowPlayingInfoCenter` directly. Windows is intentionally unwired (would need a hidden message-only HWND + a per-tick `pump_event_queue`).
 
 ## Tests
