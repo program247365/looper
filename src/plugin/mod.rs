@@ -24,6 +24,9 @@ pub struct TrackInfo {
     pub service: Option<String>,
     pub thumbnail_path: Option<PathBuf>,
     pub is_live: bool,
+    /// Name of the playlist or album this track was resolved from, if any.
+    /// Shown in the playback header so you know what collection is playing.
+    pub collection: Option<String>,
 }
 
 pub trait ServicePlugin {

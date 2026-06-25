@@ -233,6 +233,7 @@ fn play_file_session(
                     service: None,
                     thumbnail_path: None,
                     is_live: false,
+                    collection: None,
                 }],
                 false,
                 ctx,
@@ -1183,6 +1184,7 @@ fn play_single_track(
         track_index,
         total_tracks,
         is_playlist,
+        collection: track.collection.clone(),
         loop_start: Instant::now(),
         pause_elapsed: Duration::default(),
         bands: vec![0.0; N_BANDS],
@@ -1261,7 +1263,12 @@ impl PrefetchWorker {
                 return;
             }
             let track = tracks[idx].clone();
-            if track.pending_download.is_none() && matches!(track.playback, PlaybackInput::File(_))
+            // Spotify streams in-process via librespot, and local files are
+            // already on disk — neither is prefetchable. Only remote
+            // download-backed tracks go through the prefetcher.
+            if matches!(track.playback, PlaybackInput::Spotify { .. })
+                || (track.pending_download.is_none()
+                    && matches!(track.playback, PlaybackInput::File(_)))
             {
                 return;
             }
@@ -1609,6 +1616,7 @@ mod tests {
             track_index: 1,
             total_tracks: 1,
             is_playlist: false,
+            collection: None,
             loop_start: Instant::now(),
             pause_elapsed: Duration::default(),
             bands: vec![0.0; N_BANDS],

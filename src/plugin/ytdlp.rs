@@ -91,6 +91,7 @@ pub fn cached_track_from_entry(entry: MetadataEntry, cache_dir: &Path, service: 
         service: Some(service.to_string()),
         thumbnail_path,
         is_live: false,
+        collection: None,
     }
 }
 
@@ -105,6 +106,7 @@ pub fn streaming_track_from_entry(entry: MetadataEntry, service: &str) -> Result
         service: Some(service.to_string()),
         thumbnail_path: None,
         is_live: matches!(entry.live_status, LiveStatus::IsLive),
+        collection: None,
     })
 }
 
@@ -129,6 +131,7 @@ pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
                 service: Some(service),
                 thumbnail_path: None,
                 is_live,
+                collection: None,
             })
         })
         .collect()

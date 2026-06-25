@@ -35,6 +35,8 @@ pub struct AppState {
     pub track_index: usize,
     pub total_tracks: usize,
     pub is_playlist: bool,
+    /// Playlist or album name this track belongs to, shown in the header.
+    pub collection: Option<String>,
     pub loop_start: Instant,
     pub pause_elapsed: Duration,
     pub bands: Vec<f32>,
@@ -694,7 +696,10 @@ fn draw_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &
     };
 
     let secondary_text = if state.is_playlist {
-        format!("Track {}/{}", state.track_index, state.total_tracks)
+        match &state.collection {
+            Some(name) => format!("{name} · Track {}/{}", state.track_index, state.total_tracks),
+            None => format!("Track {}/{}", state.track_index, state.total_tracks),
+        }
     } else if state.is_live {
         "LIVE".to_string()
     } else {

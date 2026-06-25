@@ -16,7 +16,9 @@
 
 use std::collections::VecDeque;
 use std::num::NonZero;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use librespot_playback::audio_backend::{Sink, SinkError, SinkResult};
@@ -33,10 +35,31 @@ pub const SPOTIFY_CHANNELS: u16 = 2;
 /// latency to tens of milliseconds while leaving the decoder room to run ahead.
 const CHANNEL_CAPACITY: usize = 8;
 
-/// Create a connected `(Sink, Source)` pair sharing one bounded channel.
-pub fn bridge() -> (SpotifySink, SpotifySource) {
+/// Create a connected sink/source pair sharing one bounded channel, plus an
+/// [`EndSignal`] used to make the source end once the current track finishes
+/// (playlist mode). Without a signal the source loops forever (single track).
+pub fn bridge() -> (SpotifySink, SpotifySource, EndSignal) {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(CHANNEL_CAPACITY);
-    (SpotifySink { tx }, SpotifySource::new(rx))
+    let finished = Arc::new(AtomicBool::new(false));
+    (
+        SpotifySink { tx },
+        SpotifySource {
+            rx,
+            current: VecDeque::new(),
+            finished: finished.clone(),
+        },
+        EndSignal(finished),
+    )
+}
+
+/// Tells a [`SpotifySource`] that no more audio is coming, so it should end
+/// after draining what's buffered (rather than yielding silence forever).
+pub struct EndSignal(Arc<AtomicBool>);
+
+impl EndSignal {
+    pub fn finish(&self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 /// librespot audio backend: forwards decoded PCM into the channel.
@@ -67,15 +90,7 @@ impl Sink for SpotifySink {
 pub struct SpotifySource {
     rx: Receiver<Vec<f32>>,
     current: VecDeque<f32>,
-}
-
-impl SpotifySource {
-    fn new(rx: Receiver<Vec<f32>>) -> Self {
-        Self {
-            rx,
-            current: VecDeque::new(),
-        }
-    }
+    finished: Arc<AtomicBool>,
 }
 
 impl Iterator for SpotifySource {
@@ -91,9 +106,16 @@ impl Iterator for SpotifySource {
                 // A sink never sends an empty buffer, but guard anyway.
                 Some(self.current.pop_front().unwrap_or(0.0))
             }
-            // Underrun, or the brief gap between loop iterations: emit silence.
-            // Never `None` — looping/track-end is driven by player events.
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => Some(0.0),
+            // Channel drained. If the track is done (playlist mode), end so the
+            // sink empties and play_loop advances. Otherwise it's a momentary
+            // underrun or the gap between loops — emit silence, never `None`.
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
+                if self.finished.load(Ordering::Acquire) {
+                    None
+                } else {
+                    Some(0.0)
+                }
+            }
         }
     }
 }

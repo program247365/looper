@@ -12,17 +12,19 @@
 
 mod sink;
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use color_eyre::eyre::{eyre, Result, WrapErr};
+use stream_download::http::reqwest::Client as HttpClient;
 
 use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
 use librespot_core::config::SessionConfig;
 use librespot_core::session::Session;
 use librespot_core::spotify_uri::SpotifyUri;
-use librespot_metadata::{Metadata, Track};
+use librespot_metadata::{Album, Metadata, Playlist, Track};
 use librespot_oauth::OAuthClientBuilder;
 use librespot_playback::config::PlayerConfig;
 use librespot_playback::mixer::NoOpVolume;
@@ -79,34 +81,169 @@ pub fn login() -> Result<()> {
     Ok(())
 }
 
-/// Resolve a Spotify URL/URI to playable tracks. Thin slice: single tracks only.
+/// Resolve a Spotify URL/URI to playable tracks: a single track, or every
+/// track of a playlist or album.
 pub fn resolve(url: &str) -> Result<Vec<TrackInfo>> {
     let uri = parse_uri(url)?;
+    let ctx = ctx()?;
     match &uri {
         SpotifyUri::Track { .. } => {
-            let ctx = ctx()?;
-            let track = ctx
-                .runtime
-                .block_on(Track::get(&ctx.session, &uri))
-                .map_err(|e| eyre!("failed to fetch Spotify track metadata: {e}"))?;
-            let track_uri = uri
-                .to_uri()
-                .map_err(|e| eyre!("failed to build Spotify track URI: {e}"))?;
-            Ok(vec![TrackInfo {
-                title: track.name,
-                duration_secs: Some((track.duration.max(0) as f64) / 1000.0),
-                playback: PlaybackInput::spotify(track_uri),
-                source_url: Some(url.to_string()),
-                pending_download: None,
-                service: Some("Spotify".to_string()),
-                thumbnail_path: None,
-                is_live: false,
-            }])
+            let info = ctx.runtime.block_on(async {
+                let track = Track::get(&ctx.session, &uri)
+                    .await
+                    .map_err(|e| eyre!("failed to fetch Spotify track metadata: {e}"))?;
+                let track_uri = uri
+                    .to_uri()
+                    .map_err(|e| eyre!("failed to build Spotify track URI: {e}"))?;
+                let thumbnail = download_cover(&HttpClient::new(), &track, &art_dir()?, 0).await;
+                Ok::<_, color_eyre::eyre::Report>(track_info(track, track_uri, None, thumbnail))
+            })?;
+            Ok(vec![info])
         }
-        SpotifyUri::Playlist { .. } | SpotifyUri::Album { .. } => Err(eyre!(
-            "Spotify playlists and albums aren't supported yet — pass a track URL for now"
+        SpotifyUri::Playlist { .. } => {
+            let tracks = ctx.runtime.block_on(async {
+                let playlist = Playlist::get(&ctx.session, &uri)
+                    .await
+                    .map_err(|e| eyre!("failed to fetch Spotify playlist: {e}"))?;
+                let name = Some(playlist.name().to_string());
+                let uris: Vec<SpotifyUri> = playlist.tracks().cloned().collect();
+                fetch_track_infos(&ctx.session, uris, name).await
+            })?;
+            ensure_nonempty(tracks, "playlist")
+        }
+        SpotifyUri::Album { .. } => {
+            let tracks = ctx.runtime.block_on(async {
+                let album = Album::get(&ctx.session, &uri)
+                    .await
+                    .map_err(|e| eyre!("failed to fetch Spotify album: {e}"))?;
+                let name = Some(album.name.clone());
+                let uris: Vec<SpotifyUri> = album.tracks().cloned().collect();
+                fetch_track_infos(&ctx.session, uris, name).await
+            })?;
+            ensure_nonempty(tracks, "album")
+        }
+        _ => Err(eyre!(
+            "unsupported Spotify link — pass a track, playlist, or album URL"
         )),
-        _ => Err(eyre!("unsupported Spotify link — pass a track URL")),
+    }
+}
+
+/// Build a `TrackInfo` from track metadata and its canonical URI. The URI is
+/// both the playback target and the history identity (it's a valid replay URL).
+/// `collection` is the playlist/album name this track came from, if any;
+/// `thumbnail_path` is its downloaded album cover, if any.
+fn track_info(
+    track: Track,
+    track_uri: String,
+    collection: Option<String>,
+    thumbnail_path: Option<PathBuf>,
+) -> TrackInfo {
+    TrackInfo {
+        title: track.name,
+        duration_secs: Some((track.duration.max(0) as f64) / 1000.0),
+        playback: PlaybackInput::spotify(track_uri.clone()),
+        source_url: Some(track_uri),
+        pending_download: None,
+        service: Some("Spotify".to_string()),
+        thumbnail_path,
+        is_live: false,
+        collection,
+    }
+}
+
+/// Fetch metadata (and album art) for many track URIs, preserving order. Runs
+/// in bounded concurrent batches so a large playlist resolves quickly without
+/// firing hundreds of simultaneous requests. Tracks that fail to fetch are
+/// dropped. `collection` (the playlist/album name) is stamped onto every track.
+async fn fetch_track_infos(
+    session: &Session,
+    uris: Vec<SpotifyUri>,
+    collection: Option<String>,
+) -> Result<Vec<TrackInfo>> {
+    const CONCURRENCY: usize = 16;
+    let client = HttpClient::new();
+    let art = art_dir()?;
+    let mut infos: Vec<Option<TrackInfo>> = (0..uris.len()).map(|_| None).collect();
+    let mut base = 0;
+    for chunk in uris.chunks(CONCURRENCY) {
+        let mut set = tokio::task::JoinSet::new();
+        for (offset, uri) in chunk.iter().enumerate() {
+            let session = session.clone();
+            let client = client.clone();
+            let art = art.clone();
+            let collection = collection.clone();
+            let uri = uri.clone();
+            let position = base + offset;
+            set.spawn(async move {
+                let info = match Track::get(&session, &uri).await {
+                    Ok(track) => match uri.to_uri() {
+                        Ok(track_uri) => {
+                            let thumbnail = download_cover(&client, &track, &art, position).await;
+                            Some(track_info(track, track_uri, collection, thumbnail))
+                        }
+                        Err(_) => None,
+                    },
+                    Err(_) => None,
+                };
+                (position, info)
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            if let Ok((position, Some(info))) = joined {
+                infos[position] = Some(info);
+            }
+        }
+        base += chunk.len();
+    }
+    Ok(infos.into_iter().flatten().collect())
+}
+
+/// Download a track's album cover (the largest size) from Spotify's public
+/// image CDN into the art cache, returning its path. Covers are keyed by file
+/// ID, so tracks sharing an album reuse one cached file. Best-effort: any
+/// failure yields `None` (art is optional).
+async fn download_cover(
+    client: &HttpClient,
+    track: &Track,
+    art_dir: &Path,
+    temp_tag: usize,
+) -> Option<PathBuf> {
+    let cover = track.album.covers.iter().max_by_key(|image| image.width)?;
+    let hex = cover.id.to_base16().ok()?;
+    let target = art_dir.join(format!("{hex}.jpg"));
+    if target.exists() {
+        return Some(target);
+    }
+    let url = format!("https://i.scdn.co/image/{hex}");
+    let bytes = client
+        .get(url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .bytes()
+        .await
+        .ok()?;
+    // Write to a per-task temp file then atomically rename, so concurrent
+    // downloads of the same shared album cover can't corrupt the target.
+    let temp = art_dir.join(format!("{hex}.{temp_tag}.tmp"));
+    std::fs::write(&temp, &bytes).ok()?;
+    std::fs::rename(&temp, &target).ok()?;
+    Some(target)
+}
+
+fn art_dir() -> Result<PathBuf> {
+    let dir = crate::plugin::cache_dir_path()?.join("spotify").join("art");
+    std::fs::create_dir_all(&dir).wrap_err("failed to create Spotify art cache directory")?;
+    Ok(dir)
+}
+
+fn ensure_nonempty(tracks: Vec<TrackInfo>, kind: &str) -> Result<Vec<TrackInfo>> {
+    if tracks.is_empty() {
+        Err(eyre!("Spotify {kind} has no playable tracks"))
+    } else {
+        Ok(tracks)
     }
 }
 
@@ -133,7 +270,7 @@ pub fn open_playback(
     let ctx = ctx()?;
     let uri =
         SpotifyUri::from_uri(track_uri).map_err(|e| eyre!("invalid Spotify track URI: {e}"))?;
-    let (spotify_sink, source) = sink::bridge();
+    let (spotify_sink, source, end_signal) = sink::bridge();
 
     let (player, duration, listener) = ctx.runtime.block_on(async move {
         let duration = match Track::get(&ctx.session, &uri).await {
@@ -151,15 +288,22 @@ pub fn open_playback(
         let mut events = player.get_player_event_channel();
         player.load(uri.clone(), true, 0);
 
-        // Re-load the same track each time it ends to loop it. The bridge
-        // emits silence during the brief reload gap, so audio never stops.
+        // On end-of-track: in single-track mode (`repeat`) re-load the same
+        // track to loop it — the bridge emits silence during the brief reload
+        // gap so audio never stops. In playlist mode, signal the source to end
+        // so the sink empties and play_loop advances to the next track.
         let listener = {
             let player = player.clone();
             let loop_uri = uri.clone();
             tokio::spawn(async move {
                 while let Some(event) = events.recv().await {
-                    if repeat && matches!(event, PlayerEvent::EndOfTrack { .. }) {
-                        player.load(loop_uri.clone(), true, 0);
+                    if matches!(event, PlayerEvent::EndOfTrack { .. }) {
+                        if repeat {
+                            player.load(loop_uri.clone(), true, 0);
+                        } else {
+                            end_signal.finish();
+                            break;
+                        }
                     }
                 }
             })
@@ -282,5 +426,17 @@ mod tests {
         let uri =
             parse_uri("https://open.spotify.com/intl-de/track/4uLU6hMCjMI75M1A2tKUQC").unwrap();
         assert_eq!(uri.to_uri().unwrap(), "spotify:track:4uLU6hMCjMI75M1A2tKUQC");
+    }
+
+    #[test]
+    fn parses_playlist_and_album_urls() {
+        assert!(matches!(
+            parse_uri("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M").unwrap(),
+            SpotifyUri::Playlist { .. }
+        ));
+        assert!(matches!(
+            parse_uri("https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy?si=x").unwrap(),
+            SpotifyUri::Album { .. }
+        ));
     }
 }
