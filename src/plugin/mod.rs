@@ -33,6 +33,12 @@ pub trait ServicePlugin {
 }
 
 pub fn resolve_url(url: &str) -> Result<Option<Vec<TrackInfo>>> {
+    // Spotify is handled by librespot, not yt-dlp, and uses `spotify:` URIs that
+    // aren't http(s). Intercept before the remote-URL and yt-dlp checks below.
+    if crate::spotify::is_spotify_url(url) {
+        return crate::spotify::resolve(url).map(Some);
+    }
+
     if !is_remote_url(url) {
         return Ok(None);
     }

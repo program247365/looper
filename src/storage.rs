@@ -422,6 +422,17 @@ pub fn track_record(track: &TrackInfo) -> Result<TrackRecord> {
         PlaybackInput::ProcessStdout { .. } => Err(eyre!(
             "cannot derive persistent track identity without a source URL"
         )),
+        // Reached only if a Spotify track ever lacks a source_url (it never
+        // does today); the URI is a stable, replayable identity regardless.
+        PlaybackInput::Spotify { track_uri } => Ok(TrackRecord {
+            track_key: track_uri.clone(),
+            replay_target: track_uri.clone(),
+            title: track.title.clone(),
+            platform: track
+                .service
+                .clone()
+                .unwrap_or_else(|| "Spotify".to_string()),
+        }),
     }
 }
 

@@ -11,6 +11,7 @@ mod play_loop;
 mod playback_input;
 mod plugin;
 mod schema;
+mod spotify;
 mod startup_logo;
 mod storage;
 mod tui;
@@ -112,6 +113,20 @@ EXAMPLES:
         #[structopt(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Manage Spotify access (Premium account required)
+    Spotify {
+        #[structopt(subcommand)]
+        cmd: SpotifyCmd,
+    },
+}
+
+#[derive(StructOpt, Debug)]
+enum SpotifyCmd {
+    /// Authorize looper with your Spotify account via your browser.
+    ///
+    /// Run this once. Credentials are cached so future playback needs no
+    /// re-login. Requires a Spotify Premium subscription.
+    Login,
 }
 
 #[derive(StructOpt, Debug)]
@@ -167,6 +182,7 @@ fn run_app(opt: Opt) -> Result<()> {
         let result = match opt.cmd {
             Some(Command::Play { url }) => play_file(&url, ctx),
             Some(Command::Config { cmd }) => cmd_config(cmd),
+            Some(Command::Spotify { cmd }) => cmd_spotify(cmd),
             None => browse_history(ctx),
         };
         match result {
@@ -205,7 +221,14 @@ fn run_app(opt: Opt) -> Result<()> {
     match opt.cmd {
         Some(Command::Play { url }) => play_file(&url, ctx),
         Some(Command::Config { cmd }) => cmd_config(cmd),
+        Some(Command::Spotify { cmd }) => cmd_spotify(cmd),
         None => browse_history(ctx),
+    }
+}
+
+fn cmd_spotify(cmd: SpotifyCmd) -> Result<()> {
+    match cmd {
+        SpotifyCmd::Login => spotify::login(),
     }
 }
 

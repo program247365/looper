@@ -91,6 +91,9 @@ pub struct AudioPlayer {
     pub channels: u16,
     input: PlaybackInput,
     refillable: bool,
+    // Keeps librespot playback alive for Spotify sources; dropping it stops the
+    // track and its end-of-track loop listener. `None` for all other inputs.
+    _spotify: Option<crate::spotify::SpotifyPlayback>,
 }
 
 trait MediaReader: Read + Seek + Send + Sync {}
@@ -106,6 +109,31 @@ impl AudioPlayer {
         // screen whenever an AudioPlayer is torn down (track/loop transitions).
         device.log_on_drop(false);
         let sink = Player::connect_new(device.mixer());
+
+        // Spotify can't be read as a file or byte stream: librespot decodes it
+        // in-process and pushes PCM through a bridge `Source`. Wire that up and
+        // return early — the file/stream decode path below doesn't apply.
+        if let PlaybackInput::Spotify { track_uri } = &input {
+            let (source, playback, sample_rate, channels, duration) =
+                crate::spotify::open_playback(track_uri, repeat)?;
+            let buf = Arc::new(Mutex::new(VecDeque::with_capacity(BUF_CAP)));
+            sink.append(SampleTap {
+                inner: source,
+                buf: buf.clone(),
+            });
+            return Ok(Self {
+                _device: device,
+                _download_runtime: None,
+                sink,
+                duration,
+                sample_buf: buf,
+                sample_rate,
+                channels,
+                input,
+                refillable: false,
+                _spotify: Some(playback),
+            });
+        }
 
         let (reader, duration, runtime, byte_len) = open_input(&input)?;
         let source = decode_input(reader, byte_len)?;
@@ -144,6 +172,7 @@ impl AudioPlayer {
             channels,
             input,
             refillable,
+            _spotify: None,
         })
     }
 
@@ -274,6 +303,11 @@ fn open_input(
                 })
                 .wrap_err("failed to open process audio stream")?;
             Ok((Box::new(reader), None, Some(runtime), None))
+        }
+        // Spotify is wired up earlier in `AudioPlayer::new` and never reaches
+        // the file/stream reader path.
+        PlaybackInput::Spotify { .. } => {
+            unreachable!("Spotify inputs are handled before open_input")
         }
     }
 }
