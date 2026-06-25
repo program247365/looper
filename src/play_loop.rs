@@ -296,7 +296,7 @@ fn handle_unresolvable_replay(
         .title_for_replay_target(replay_target)?
         .unwrap_or_else(|| replay_target.to_string());
     let title = truncate_title(&title, 60);
-    let detail = "This video may be private, removed, or region-locked.";
+    let detail = "This track may be private, removed, or region-locked.";
     title_state.set("looper — track unavailable".to_string())?;
 
     loop {

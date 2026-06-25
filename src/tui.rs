@@ -1165,6 +1165,7 @@ fn service_badge(service: &Option<String>) -> Span<'static> {
         Some("YouTube") => badge_span("YT", Color::Rgb(255, 90, 90)),
         Some("SoundCloud") => badge_span("SC", Color::Rgb(255, 150, 50)),
         Some("HypeM") => badge_span("HM", Color::Rgb(80, 200, 210)),
+        Some("Spotify") => badge_span("SP", Color::Rgb(30, 215, 96)),
         Some("Online") => badge_span("ON", Color::Rgb(180, 180, 200)),
         _ => Span::raw(""),
     }

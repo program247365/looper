@@ -24,6 +24,7 @@ use librespot_core::cache::Cache;
 use librespot_core::config::SessionConfig;
 use librespot_core::session::Session;
 use librespot_core::spotify_uri::SpotifyUri;
+use librespot_metadata::audio::AudioItem;
 use librespot_metadata::{Album, Metadata, Playlist, Track};
 use librespot_oauth::OAuthClientBuilder;
 use librespot_playback::config::PlayerConfig;
@@ -95,6 +96,7 @@ pub fn resolve(url: &str) -> Result<Vec<TrackInfo>> {
                 let track_uri = uri
                     .to_uri()
                     .map_err(|e| eyre!("failed to build Spotify track URI: {e}"))?;
+                ensure_track_available(&ctx.session, &uri).await?;
                 let thumbnail = download_cover(&HttpClient::new(), &track, &art_dir()?, 0).await;
                 Ok::<_, color_eyre::eyre::Report>(track_info(track, track_uri, None, thumbnail))
             })?;
@@ -231,6 +233,28 @@ async fn download_cover(
     std::fs::write(&temp, &bytes).ok()?;
     std::fs::rename(&temp, &target).ok()?;
     Some(target)
+}
+
+/// Error if a track won't play for this account. librespot computes
+/// availability against the account's country and follows relinked
+/// alternatives, so this matches the player's own verdict: unavailable with no
+/// playable alternative. Surfacing it as an error lets the caller show the
+/// "track unavailable" modal instead of playing silence. Used only for a single
+/// directly-requested track; playlist/album tracks are dropped at resolve.
+async fn ensure_track_available(session: &Session, uri: &SpotifyUri) -> Result<()> {
+    let item = AudioItem::get_file(session, uri.clone()).await.map_err(|_| {
+        eyre!("this Spotify track couldn't be loaded (it may be removed or region-locked)")
+    })?;
+    let has_alternative = item
+        .alternatives
+        .as_ref()
+        .is_some_and(|alts| !alts.is_empty());
+    if item.availability.is_err() && !has_alternative {
+        return Err(eyre!(
+            "this Spotify track is unavailable (removed or region-locked)"
+        ));
+    }
+    Ok(())
 }
 
 fn art_dir() -> Result<PathBuf> {

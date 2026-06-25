@@ -18,12 +18,17 @@ But `--url` now accepts:
 - YouTube tracks and playlists
 - SoundCloud tracks and playlists
 - HypeM URLs
+- Spotify tracks, playlists, and albums (`https://open.spotify.com/...` or
+  `spotify:...`), via librespot — **Spotify Premium required**
 
 Behavior:
 
 - local files: play directly
 - single tracks: loop forever
 - playlists: play each track once, then loop the whole playlist
+
+Spotify needs a one-time `looper spotify login` (OAuth browser flow, credentials
+cached). See "Spotify playback model" below.
 
 ## Commands
 
@@ -50,12 +55,15 @@ cargo test
 
 ## External Runtime Dependencies
 
-Remote playback requires:
+YouTube / SoundCloud / HypeM playback requires:
 
 - `yt-dlp`
 - `ffmpeg`
 
 If YouTube playback fails with `403`, updating `yt-dlp` is the first thing to try.
+
+Spotify requires **neither** `yt-dlp` nor `ffmpeg` (librespot decodes in-process)
+— only a Spotify Premium account and a one-time `looper spotify login`.
 
 ## Install via Homebrew
 
@@ -77,6 +85,13 @@ Tap repo: https://github.com/program247365/homebrew-tap
 - `stream-download` — HTTP/process-backed stream readers
 - `tokio` — runtime used by streamed/process-backed audio inputs
 - `structopt` — CLI parsing
+- `librespot-core` / `-playback` / `-metadata` / `-oauth` — Spotify session,
+  in-process decode, metadata, and OAuth login. `librespot-playback` is built
+  with `default-features = false` so its bundled (older) rodio backend stays out
+  of the tree — looper feeds a custom `Sink` instead. **`vergen` is pinned to
+  9.0.6 in `Cargo.lock`**; a `cargo update` that pulls vergen 9.1.0 breaks
+  librespot-core's build script (vergen-lib trait mismatch) — re-pin with
+  `cargo update -p vergen --precise 9.0.6` (also noted in `Cargo.toml`/`Makefile`).
 
 ## Architecture
 
@@ -90,7 +105,10 @@ Tap repo: https://github.com/program247365/homebrew-tap
 - `src/tui.rs` — playback TUI and loading TUI rendering
 - `src/download.rs` — loading/progress state models and helpers for formatting bytes/speed/ETA
 - `src/plugin/` — remote service resolution and `yt-dlp` integration
-- `src/playback_input.rs` — playback input abstraction (`File`, `HttpStream`, `ProcessStdout`) plus pending-download metadata
+- `src/spotify/` — Spotify via librespot: shared session, OAuth login, metadata
+  resolution, the librespot-`Sink`→rodio-`Source` bridge. `main.rs` routes the
+  `spotify login` subcommand here. See "Spotify playback model" below.
+- `src/playback_input.rs` — playback input abstraction (`File`, `HttpStream`, `ProcessStdout`, `Spotify`) plus pending-download metadata
 
 ### Remote playback model
 
@@ -114,6 +132,35 @@ The project now uses a hybrid remote architecture.
 - `src/plugin/hypem.rs`
   - prefers stream-first resolution and falls back to download-first
 
+`plugin::resolve_url` intercepts Spotify URLs/URIs **before** the `yt-dlp`
+availability check and dispatches to `crate::spotify::resolve`, so Spotify works
+without `yt-dlp` installed.
+
+### Spotify playback model
+
+Spotify is not a `yt-dlp` plugin — it has no downloadable audio. `src/spotify/`
+uses librespot:
+
+- `src/spotify/mod.rs`
+  - `is_spotify_url`, URL/URI parsing (`open.spotify.com/...`, `intl-xx`
+    prefixes, `spotify:` URIs)
+  - a shared, lazily-connected `Session` (`OnceLock`) built from cached OAuth
+    credentials; `login()` runs the `librespot-oauth` browser flow once.
+    `Session::new` calls `Handle::current()`, so it must be built **inside** the
+    runtime (`runtime.block_on`)
+  - `resolve()` → `Vec<TrackInfo>` for a track, playlist, or album, fetching
+    track metadata + album art concurrently (bounded batches). Album art is a
+    public `i.scdn.co` JPEG keyed by file id, cached under `spotify/art/`
+  - `ensure_track_available()` uses librespot's `AudioItem` availability to fail
+    a single unplayable track at resolve time, so `resolve_url_with_startup`
+    surfaces the "track unavailable" modal instead of playing silence
+- `src/spotify/sink.rs` — the bridge. librespot's `Player` pushes decoded PCM
+  into a custom `Sink`; a bounded channel carries it to a rodio `Source`. The
+  sink blocks under backpressure (throttling the decoder to real time); the
+  source yields silence on underrun. An `EndSignal` lets the source end on
+  demand: single tracks loop forever (listener re-`load`s on `EndOfTrack`),
+  playlist tracks finish so `play_loop`'s `sink.empty()` advances to the next.
+
 ### Playback inputs
 
 `PlaybackInput` currently supports:
@@ -121,6 +168,9 @@ The project now uses a hybrid remote architecture.
 - `File(PathBuf)` — local files and cached remote tracks
 - `HttpStream { .. }` — direct HTTP-backed stream reader
 - `ProcessStdout { .. }` — process-backed stream through `stream-download`
+- `Spotify { track_uri }` — handled in `AudioPlayer::new` by the librespot
+  bridge (`src/spotify/`); never reaches the file/stream reader path. Pause works
+  via rodio backpressure; seek is a no-op
 
 Note that YouTube is intentionally on the cached-file path right now because direct/process streaming proved less reliable than download-first with current `yt-dlp` behavior.
 
@@ -152,7 +202,7 @@ There are now two major UI modes:
 
 - single local or remote track: `repeat_infinite()`
 - playlist: play each track once, then loop the playlist
-- `PrefetchWorker` in `play_loop.rs` uses a bounded channel and background thread to cache current/next tracks where applicable
+- `PrefetchWorker` in `play_loop.rs` uses a bounded channel and background thread to cache current/next tracks where applicable. **Spotify tracks are skipped** by the prefetcher (they stream in-process via librespot and have no `source_url` to download), so there is a brief loading screen between Spotify playlist tracks
 - remote playlists are re-resolved each full loop so expiring service URLs are less likely to be reused forever
 
 ### Threading model
@@ -163,6 +213,7 @@ There are now two major UI modes:
 - the visualizer reads from `sample_buf: Arc<Mutex<VecDeque<f32>>>`
 - prefetch uses a background worker thread
 - some stream-backed audio inputs create a Tokio runtime inside `AudioPlayer`
+- Spotify owns a process-wide Tokio runtime + connected `Session` in `src/spotify/` (`OnceLock`); librespot's `Player` and the end-of-track loop listener run on it. The bridge's end-of-track listener is aborted when the `AudioPlayer`'s `SpotifyPlayback` drops, releasing the `Player`
 - media-key events from `souvlaki` arrive on the OS-specific thread (macOS: main / AppKit; Linux: souvlaki's own DBus thread) and are forwarded to the TUI thread via an `mpsc::Receiver<KeyCommand>` drained inside `run_loop`
 
 ## Notable Design Decisions
@@ -179,6 +230,18 @@ There are now two major UI modes:
   (`SessionOutcome::BackToHistory`) rather than exiting. Quitting playback with
   `q` still exits the app (`SessionOutcome::Quit`). This is intentional — a
   "jukebox historian" accumulates links that inevitably rot.
+- Spotify playback uses librespot (reverse-engineered Spotify Connect),
+  **Premium-only**, with a custom librespot `Sink` feeding rodio so the
+  visualizer keeps working — rather than librespot's own rodio backend (which
+  would bypass the sample tap and also drag a second, incompatible rodio into
+  the tree). `librespot-playback` is therefore `default-features = false`.
+- `vergen` is pinned to `9.0.6` (`Cargo.lock`) to keep librespot-core's build
+  script compiling; see the note in `Cargo.toml`/`Makefile`. Re-pin after a
+  `cargo update` with `cargo update -p vergen --precise 9.0.6` if the build
+  fails with a vergen-lib trait mismatch.
+- a directly-requested **single** Spotify track that is unavailable is caught at
+  resolve (`ensure_track_available`) so it shows the modal; unavailable tracks
+  inside a playlist/album are silently dropped during concurrent metadata fetch.
 - `souvlaki` is wired with the `use_zbus` feature so Linux builds don't need `libdbus-1-dev`; macOS uses `MPRemoteCommandCenter` + `MPNowPlayingInfoCenter` directly. Windows is intentionally unwired (would need a hidden message-only HWND + a per-tick `pump_event_queue`).
 
 ## Tests

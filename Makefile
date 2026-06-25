@@ -14,6 +14,11 @@ help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 # ── Local development ─────────────────────────────────────────────────────────
+#
+# NOTE: `vergen` is pinned to 9.0.6 in Cargo.lock to keep librespot-core's build
+# script compiling (see the note in Cargo.toml). If a build fails with a
+# vergen-lib trait mismatch after `cargo update`, re-pin with:
+#   cargo update -p vergen --precise 9.0.6
 
 build: ## Build debug binary
 	cargo build

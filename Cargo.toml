@@ -29,6 +29,16 @@ rodio = { version = "0.22", default-features = false, features = ["playback", "m
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 structopt = "0.3.21"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+# Spotify playback. `librespot-playback` has default-features off on purpose:
+# it keeps the bundled (older) rodio audio backend out of the tree so there is
+# only one rodio. We feed librespot's decoded PCM through our own custom Sink
+# (src/spotify/sink.rs) instead.
+#
+# NOTE: `vergen` is pinned to 9.0.6 in Cargo.lock. librespot-core's build script
+# pulls vergen-gitcl 1.0.8 (which needs vergen ^9.0.6), but vergen 9.1.0 bumps
+# its internal vergen-lib to 9.x and collides with vergen-gitcl's vergen-lib
+# 0.1.6, breaking the build. If `cargo update` ever reintroduces vergen 9.1.0,
+# re-pin with: cargo update -p vergen --precise 9.0.6
 librespot-core = "0.8"
 librespot-metadata = "0.8"
 librespot-oauth = "0.8"
