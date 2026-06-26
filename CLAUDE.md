@@ -144,10 +144,13 @@ uses librespot:
 - `src/spotify/mod.rs`
   - `is_spotify_url`, URL/URI parsing (`open.spotify.com/...`, `intl-xx`
     prefixes, `spotify:` URIs)
-  - a shared, lazily-connected `Session` (`OnceLock`) built from cached OAuth
-    credentials; `login()` runs the `librespot-oauth` browser flow once.
-    `Session::new` calls `Handle::current()`, so it must be built **inside** the
-    runtime (`runtime.block_on`)
+  - a shared runtime (`OnceLock`, never replaced — it hosts player tasks) plus a
+    rebuildable `Session` (`Mutex<Option<Session>>`). `session()` reconnects from
+    cached credentials when the previous session `is_invalid()` (sleep/wake,
+    network change) — librespot's core `Session` does **not** auto-reconnect, so
+    track transitions self-heal here. `login()` runs the `librespot-oauth`
+    browser flow once. `Session::new` calls `Handle::current()`, so it must be
+    built **inside** the runtime (`runtime.block_on`)
   - `resolve()` → `Vec<TrackInfo>` for a track, playlist, or album, fetching
     track metadata + album art concurrently (bounded batches). Album art is a
     public `i.scdn.co` JPEG keyed by file id, cached under `spotify/art/`
@@ -213,7 +216,7 @@ There are now two major UI modes:
 - the visualizer reads from `sample_buf: Arc<Mutex<VecDeque<f32>>>`
 - prefetch uses a background worker thread
 - some stream-backed audio inputs create a Tokio runtime inside `AudioPlayer`
-- Spotify owns a process-wide Tokio runtime + connected `Session` in `src/spotify/` (`OnceLock`); librespot's `Player` and the end-of-track loop listener run on it. The bridge's end-of-track listener is aborted when the `AudioPlayer`'s `SpotifyPlayback` drops, releasing the `Player`
+- Spotify owns a process-wide Tokio runtime in `src/spotify/` (`OnceLock`, never replaced — librespot's `Player` and the end-of-track loop listener run on it). The `Session` lives in a `Mutex<Option<Session>>` and is rebuilt by `session()` when `is_invalid()`, so a dropped connection reconnects at the next track (the currently-playing track's `Player` is bound to the old session and can't self-heal mid-stream; a single track looping forever won't recover until restart). The bridge's end-of-track listener is aborted when the `AudioPlayer`'s `SpotifyPlayback` drops, releasing the `Player`
 - media-key events from `souvlaki` arrive on the OS-specific thread (macOS: main / AppKit; Linux: souvlaki's own DBus thread) and are forwarded to the TUI thread via an `mpsc::Receiver<KeyCommand>` drained inside `run_loop`
 
 ## Notable Design Decisions

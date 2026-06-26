@@ -13,7 +13,7 @@
 mod sink;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use color_eyre::eyre::{eyre, Result, WrapErr};
@@ -87,16 +87,17 @@ pub fn login() -> Result<()> {
 pub fn resolve(url: &str) -> Result<Vec<TrackInfo>> {
     let uri = parse_uri(url)?;
     let ctx = ctx()?;
+    let session = session()?;
     match &uri {
         SpotifyUri::Track { .. } => {
             let info = ctx.runtime.block_on(async {
-                let track = Track::get(&ctx.session, &uri)
+                let track = Track::get(&session, &uri)
                     .await
                     .map_err(|e| eyre!("failed to fetch Spotify track metadata: {e}"))?;
                 let track_uri = uri
                     .to_uri()
                     .map_err(|e| eyre!("failed to build Spotify track URI: {e}"))?;
-                ensure_track_available(&ctx.session, &uri).await?;
+                ensure_track_available(&session, &uri).await?;
                 let thumbnail = download_cover(&HttpClient::new(), &track, &art_dir()?, 0).await;
                 Ok::<_, color_eyre::eyre::Report>(track_info(track, track_uri, None, thumbnail))
             })?;
@@ -104,23 +105,23 @@ pub fn resolve(url: &str) -> Result<Vec<TrackInfo>> {
         }
         SpotifyUri::Playlist { .. } => {
             let tracks = ctx.runtime.block_on(async {
-                let playlist = Playlist::get(&ctx.session, &uri)
+                let playlist = Playlist::get(&session, &uri)
                     .await
                     .map_err(|e| eyre!("failed to fetch Spotify playlist: {e}"))?;
                 let name = Some(playlist.name().to_string());
                 let uris: Vec<SpotifyUri> = playlist.tracks().cloned().collect();
-                fetch_track_infos(&ctx.session, uris, name).await
+                fetch_track_infos(&session, uris, name).await
             })?;
             ensure_nonempty(tracks, "playlist")
         }
         SpotifyUri::Album { .. } => {
             let tracks = ctx.runtime.block_on(async {
-                let album = Album::get(&ctx.session, &uri)
+                let album = Album::get(&session, &uri)
                     .await
                     .map_err(|e| eyre!("failed to fetch Spotify album: {e}"))?;
                 let name = Some(album.name.clone());
                 let uris: Vec<SpotifyUri> = album.tracks().cloned().collect();
-                fetch_track_infos(&ctx.session, uris, name).await
+                fetch_track_infos(&session, uris, name).await
             })?;
             ensure_nonempty(tracks, "album")
         }
@@ -292,19 +293,20 @@ pub fn open_playback(
     repeat: bool,
 ) -> Result<(SpotifySource, SpotifyPlayback, u32, u16, Option<Duration>)> {
     let ctx = ctx()?;
+    let session = session()?;
     let uri =
         SpotifyUri::from_uri(track_uri).map_err(|e| eyre!("invalid Spotify track URI: {e}"))?;
     let (spotify_sink, source, end_signal) = sink::bridge();
 
     let (player, duration, listener) = ctx.runtime.block_on(async move {
-        let duration = match Track::get(&ctx.session, &uri).await {
+        let duration = match Track::get(&session, &uri).await {
             Ok(track) => Some(Duration::from_millis(track.duration.max(0) as u64)),
             Err(_) => None,
         };
 
         let player = Player::new(
             PlayerConfig::default(),
-            ctx.session.clone(),
+            session,
             Box::new(NoOpVolume),
             move || Box::new(spotify_sink),
         );
@@ -346,41 +348,62 @@ pub fn open_playback(
     ))
 }
 
-/// Shared, connected librespot session plus the runtime its tasks run on.
+/// Shared librespot runtime plus a session that can be rebuilt on demand. The
+/// runtime is created once and never replaced — it hosts every track's player
+/// tasks, so dropping it would kill playback. Only the session is swapped when
+/// its connection dies.
 struct SpotifyCtx {
     runtime: Runtime,
-    session: Session,
+    session: Mutex<Option<Session>>,
 }
 
 static CTX: OnceLock<SpotifyCtx> = OnceLock::new();
 
-/// Lazily connect (once per process) and return the shared context. Calls
-/// after the first reuse the same connection.
+/// The shared runtime + session slot, created once per process. Does not
+/// connect — that happens lazily in [`session`].
 fn ctx() -> Result<&'static SpotifyCtx> {
     if let Some(ctx) = CTX.get() {
         return Ok(ctx);
     }
-    let ctx = init_ctx()?;
+    let ctx = SpotifyCtx {
+        runtime: build_runtime()?,
+        session: Mutex::new(None),
+    };
     // A racing thread may have set it first; that's fine, drop ours.
     let _ = CTX.set(ctx);
     Ok(CTX.get().expect("context was just set"))
 }
 
-fn init_ctx() -> Result<SpotifyCtx> {
-    let runtime = build_runtime()?;
+/// A connected librespot session (a cheap `Arc` clone). Reconnects from cached
+/// credentials if the previous session died — e.g. after sleep/wake or a
+/// network change — so playback recovers at the next track instead of failing.
+/// librespot's core `Session` does not auto-reconnect, so we do it here. Called
+/// at each track boundary (resolve / open_playback), never inside an async
+/// context, so the blocking reconnect is safe.
+fn session() -> Result<Session> {
+    let ctx = ctx()?;
+    let mut slot = ctx.session.lock().unwrap();
+    let needs_connect = slot.as_ref().map_or(true, |session| session.is_invalid());
+    if needs_connect {
+        *slot = Some(connect_session(&ctx.runtime)?);
+    }
+    Ok(slot.as_ref().expect("session connected above").clone())
+}
+
+/// Connect a fresh session from cached OAuth credentials (no re-login needed —
+/// the cached credential is long-lived). `Session::new` calls
+/// `Handle::current()`, so it must be built inside the runtime.
+fn connect_session(runtime: &Runtime) -> Result<Session> {
     let cache = open_cache()?;
     let credentials = cache
         .credentials()
         .ok_or_else(|| eyre!("not logged in to Spotify — run `looper spotify login` first"))?;
-    // `Session::new` calls `Handle::current()`, so build + connect it inside the
-    // runtime context.
-    let session = runtime
+    runtime
         .block_on(async move {
             let session = Session::new(SessionConfig::default(), Some(cache));
             session.connect(credentials, true).await.map(|()| session)
         })
-        .wrap_err("failed to connect to Spotify (is your Premium login still valid?)")?;
-    Ok(SpotifyCtx { runtime, session })
+        .wrap_err("failed to connect to Spotify (is your Premium login still valid?)")
 }
 
 fn open_cache() -> Result<Cache> {
