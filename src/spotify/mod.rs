@@ -141,6 +141,18 @@ fn track_info(
     collection: Option<String>,
     thumbnail_path: Option<PathBuf>,
 ) -> TrackInfo {
+    let artist = if track.artists.is_empty() {
+        None
+    } else {
+        Some(
+            track
+                .artists
+                .iter()
+                .map(|a| a.name.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
     TrackInfo {
         title: track.name,
         duration_secs: Some((track.duration.max(0) as f64) / 1000.0),
@@ -151,6 +163,7 @@ fn track_info(
         thumbnail_path,
         is_live: false,
         collection,
+        artist,
     }
 }
 

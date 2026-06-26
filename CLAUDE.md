@@ -245,6 +245,15 @@ There are now two major UI modes:
 - a directly-requested **single** Spotify track that is unavailable is caught at
   resolve (`ensure_track_available`) so it shows the modal; unavailable tracks
   inside a playlist/album are silently dropped during concurrent metadata fetch.
+- the OS Now Playing widget (`media_controls::set_metadata`) gets title, artist
+  (real artist when the source provides one — Spotify `Track.artists`, yt-dlp
+  `artist`/`uploader`; falls back to the service name), album (the playlist/album
+  `collection`), and cover art. Cover art is passed as a percent-encoded
+  `file://` URL of `thumbnail_path` (souvlaki hands it to `NSImage` /
+  MPRIS). Stream-first SoundCloud/HypeM tracks fetch their thumbnail lazily at
+  playback via `ytdlp::fetch_thumbnail`; local files (no embedded art) use a
+  bundled fallback cover embedded from `assets/local-cover.png` via
+  `include_bytes!` and materialized into the cache, so the widget is never blank.
 - `souvlaki` is wired with the `use_zbus` feature so Linux builds don't need `libdbus-1-dev`; macOS uses `MPRemoteCommandCenter` + `MPNowPlayingInfoCenter` directly. Windows is intentionally unwired (would need a hidden message-only HWND + a per-tick `pump_event_queue`).
 
 ## Tests

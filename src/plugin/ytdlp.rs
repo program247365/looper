@@ -15,6 +15,7 @@ use super::TrackInfo;
 pub struct MetadataEntry {
     pub id: String,
     pub title: String,
+    pub artist: Option<String>,
     pub duration_secs: Option<f64>,
     pub webpage_url: String,
     pub live_status: LiveStatus,
@@ -92,6 +93,7 @@ pub fn cached_track_from_entry(entry: MetadataEntry, cache_dir: &Path, service: 
         thumbnail_path,
         is_live: false,
         collection: None,
+        artist: entry.artist,
     }
 }
 
@@ -107,6 +109,7 @@ pub fn streaming_track_from_entry(entry: MetadataEntry, service: &str) -> Result
         thumbnail_path: None,
         is_live: matches!(entry.live_status, LiveStatus::IsLive),
         collection: None,
+        artist: entry.artist,
     })
 }
 
@@ -132,6 +135,7 @@ pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
                 thumbnail_path: None,
                 is_live,
                 collection: None,
+                artist: entry.artist,
             })
         })
         .collect()
@@ -230,6 +234,38 @@ pub fn download_thumbnail_only(url: &str, cache_dir: &Path) -> Result<()> {
         bail!("yt-dlp thumbnail backfill exited with non-success status");
     }
     Ok(())
+}
+
+/// Fetch a track's thumbnail and return its cached path. One yt-dlp call both
+/// writes the thumbnail (named `<id>.jpg`) and prints the id used to name it, so
+/// callers don't need to know the id ahead of time. Best-effort: `None` on any
+/// failure. Used to lazily backfill artwork for stream-first tracks
+/// (SoundCloud/HypeM), which are never downloaded.
+pub fn fetch_thumbnail(url: &str, cache_dir: &Path) -> Option<PathBuf> {
+    let output_template = cache_dir.join("%(id)s.%(ext)s");
+    let output = Command::new("yt-dlp")
+        .arg("--skip-download")
+        .arg("--write-thumbnail")
+        .arg("--convert-thumbnails")
+        .arg("jpg")
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        .arg("--print")
+        .arg("id")
+        .arg("-o")
+        .arg(&output_template)
+        .arg(url)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() {
+        return None;
+    }
+    thumbnail_for(cache_dir, &id)
 }
 
 pub fn download_track_with_progress(
@@ -365,6 +401,9 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
         .map(sanitize_id)
         .unwrap_or_else(|| sanitize_id(&title));
 
+    let artist = first_str(&value, &["artist", "creator", "uploader", "channel"])
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
     let duration_secs = value.get("duration").and_then(Value::as_f64);
     let webpage_url = youtube_watch_url(&value)
         .or_else(|| {
@@ -382,6 +421,7 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
     Ok(MetadataEntry {
         id,
         title,
+        artist,
         duration_secs,
         webpage_url,
         live_status,

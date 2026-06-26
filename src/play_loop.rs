@@ -179,6 +179,19 @@ fn browse_history_session(
     }
 }
 
+/// Path to the bundled fallback album cover for local files, which have no
+/// embedded art. The PNG is embedded in the binary and materialized into the
+/// cache on first use, so a Homebrew-installed binary needs no external asset.
+/// Best-effort: `None` if it can't be written (then the cover is simply blank).
+fn local_file_cover() -> Option<std::path::PathBuf> {
+    const COVER: &[u8] = include_bytes!("../assets/local-cover.png");
+    let path = plugin::cache_dir_path().ok()?.join("local-cover.png");
+    if !path.exists() {
+        std::fs::write(&path, COVER).ok()?;
+    }
+    Some(path)
+}
+
 fn play_file_session(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     title_state: &mut TitleState,
@@ -231,9 +244,12 @@ fn play_file_session(
                     source_url: None,
                     pending_download: None,
                     service: None,
-                    thumbnail_path: None,
+                    // Local files have no embedded art; use the bundled fallback
+                    // cover so the macOS Now Playing widget is never blank.
+                    thumbnail_path: local_file_cover(),
                     is_live: false,
                     collection: None,
+                    artist: None,
                 }],
                 false,
                 ctx,
@@ -1352,6 +1368,23 @@ fn prepare_track_for_playback(
             }
             track.pending_download = None;
             return Ok(false);
+        }
+    }
+
+    // Stream-first tracks (SoundCloud/HypeM) are never downloaded, so the
+    // cached-file backfill above never runs and they'd have no artwork. Fetch
+    // the thumbnail lazily for the current track only (not every track in a
+    // playlist upfront). Spotify and YouTube-live already carry their art.
+    if track.thumbnail_path.is_none()
+        && matches!(
+            track.playback,
+            PlaybackInput::HttpStream { .. } | PlaybackInput::ProcessStdout { .. }
+        )
+    {
+        if let Some(source_url) = track.source_url.clone() {
+            if let Ok(cache_dir) = plugin::cache_dir_path() {
+                track.thumbnail_path = ytdlp::fetch_thumbnail(&source_url, &cache_dir);
+            }
         }
     }
 

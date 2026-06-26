@@ -27,6 +27,9 @@ pub struct TrackInfo {
     /// Name of the playlist or album this track was resolved from, if any.
     /// Shown in the playback header so you know what collection is playing.
     pub collection: Option<String>,
+    /// Performing artist(s), when the source provides them. Surfaced in the OS
+    /// Now Playing widget; falls back to the service name when absent.
+    pub artist: Option<String>,
 }
 
 pub trait ServicePlugin {
