@@ -1,387 +1,69 @@
 # Looper
 
-> A CLI audio looper with a real-time FFT visualizer, startup screen, default history browser, favorites, fullscreen mode, and online URL support.
+**A terminal music player that loops anything — local files, [YouTube](https://www.youtube.com), [SoundCloud](https://soundcloud.com), [HypeM](https://hypem.com), and [Spotify](https://www.spotify.com) — with a real-time visualizer and native Now Playing integration for macOS.**
 
 ![Looper fullscreen visualizer](screenshots/looper.png)
 
-## What It Does
+Drop in a file or paste a URL and looper plays it on repeat in a clean `ratatui`
+terminal UI: a live FFT scatter visualizer, album art, history, favorites, and
+full macOS/Linux media-key support. Put on a track, hit fullscreen, stay in the
+zone.
 
-`looper` plays audio in a terminal UI built with `ratatui`.
+## Highlights
 
-It supports:
-
-- local audio files
-- YouTube URLs (including live streams)
-- SoundCloud URLs
-- HypeM URLs
-- Spotify tracks, playlists, and albums (Spotify Premium required)
-- single tracks and playlists
-- infinite looping for single tracks
-- whole-playlist looping for playlists
-- pause / resume
-- fullscreen visualizer
-- centered ASCII startup/loading screen with cheeky boot logs
-- default no-arg startup into playlist history
-- SQLite-backed playback history and favorites
-- remote download/loading UI with progress, speed, and ETA
-- small source badges in the TUI for supported services (`YT`, `SC`, `HM`, `SP`)
-- animated terminal/tab title with playback, pause, and loading status
-- OS **Now Playing** integration (macOS Control Center / lock screen, Linux MPRIS)
-  with album art, artist, and album for every source — plus play/pause/next/prev
-  media keys
+- **Play from anywhere** — local files, [YouTube](https://www.youtube.com) (incl. live), [SoundCloud](https://soundcloud.com), [HypeM](https://hypem.com), and [Spotify](https://www.spotify.com) tracks, playlists, and albums
+- **Real-time visualizer** — a log-spaced FFT scatter with a fullscreen mode (`f`)
+- **Loops the way you want** — single tracks forever; playlists and albums play through, then repeat
+- **Native Now Playing** — album art, artist, and album in macOS Control Center / lock screen and Linux MPRIS, plus play/pause/next/previous media keys
+- **Remembers everything** — SQLite-backed history and favorites, with optional cross-device sync
+- **Offline-first and resilient** — a fast local DB, cached downloads, automatic Spotify reconnect, and graceful handling of dead links
 
 ## Install
-
-### Homebrew (Apple Silicon)
-
-Fresh install:
 
 ```shell
 brew tap program247365/tap
 brew install looper
 ```
 
-Upgrade an existing install:
+Apple Silicon gets a prebuilt binary. For Intel, building from source, or Linux,
+see [Installation](docs/installation.md).
+
+## Quick start
 
 ```shell
-brew update
-brew upgrade program247365/tap/looper
-```
-
-The Homebrew formula ships a prebuilt binary for `aarch64-apple-darwin`, so install and upgrade are a small download and a file move — no compile step on your machine. `ffmpeg` and `yt-dlp` are pulled in automatically as runtime dependencies.
-
-Intel macOS users: there is no prebuilt binary. See "Build from source" below or use `brew install --HEAD program247365/tap/looper` to compile from `main`.
-
-### Build from source
-
-```shell
-git clone https://github.com/program247365/looper.git
-cd looper
-make install
-```
-
-Requires Rust. Install via [rustup](https://rustup.rs) if needed.
-
-For remote URL playback (YouTube, SoundCloud, HypeM), also install `yt-dlp` and `ffmpeg`:
-
-```shell
-brew install yt-dlp ffmpeg
-```
-
-If YouTube playback starts failing with `403` errors, update `yt-dlp` first.
-
-## Usage
-
-### Default startup
-
-```shell
-looper
-```
-
-This opens the playlist history browser with no active playback. Press `Enter` on a row to start playing it.
-
-If you want to skip the browser and jump straight into playback, use `looper play --url ...`.
-
-### Local file
-
-```shell
-looper play --url "/path/to/your/song.mp3"
-```
-
-### YouTube
-
-```shell
+looper                                              # browse your history; Enter to replay
+looper play --url ~/music/focus.mp3                 # a local file, on loop
 looper play --url "https://www.youtube.com/watch?v=xAR6N9N8e6U"
 ```
 
-### YouTube Live
-
-Livestream URLs are detected automatically and played as a continuous stream
-(no full download, no loop counter — a red `● STREAMING` badge replaces the
-usual `● PLAYING` label).
-
-```shell
-looper play --url "https://www.youtube.com/watch?v=YmQ7jRgf4f0"
-```
-
-That example is Anthropic's Claude FM channel — music for thinking and
-building.
-
-### SoundCloud
-
-```shell
-looper play --url "https://soundcloud.com/odesza/line-of-sight-feat-wynne-mansionair"
-```
-
-### HypeM
-
-```shell
-looper play --url "https://hypem.com/track/2gq0d/CHVRCHES+-+Clearest+Blue"
-```
-
-### Playlists
-
-```shell
-looper play --url "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI"
-```
-
-### Spotify
-
-Spotify requires a **Spotify Premium** account. Authorize looper once via your
-browser:
+[Spotify](https://www.spotify.com) (Premium) takes a one-time browser login:
 
 ```shell
 looper spotify login
-```
-
-This opens Spotify's authorization page, then caches credentials so you won't
-need to log in again. After that, play tracks, playlists, or albums:
-
-```shell
-looper play --url "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"
-looper play --url "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
 looper play --url "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
 ```
 
-`spotify:` URIs work too. Spotify does **not** require `yt-dlp` or `ffmpeg`.
+Press `f` for fullscreen, `space` to pause, `p` for history, `q` to quit. More
+examples and keybindings in [Usage & Keys](docs/usage.md).
 
-## How Remote Playback Works
+## Documentation
 
-- startup opens the local SQLite database, runs embedded migrations, and then begins loading playback
-- `yt-dlp` extracts track metadata and media URLs
-- remote audio is cached locally (see [Data and Cache Locations](#data-and-cache-locations))
-- uncached remote tracks show a full-screen loading scene before playback
-- single tracks loop forever
-- playlists play each track once, then loop the entire playlist
-- background prefetch caches upcoming playlist tracks when possible
+| Guide | What's inside |
+|-------|---------------|
+| [Installation](docs/installation.md) | Homebrew, build from source, runtime dependencies |
+| [Usage & Keys](docs/usage.md) | Every source, playlists, controls, the history panel |
+| [Spotify](docs/spotify.md) | Login, playback, and how librespot streaming works |
+| [Now Playing & Media Keys](docs/now-playing.md) | The OS media-session integration |
+| [How Playback Works](docs/playback.md) | The `yt-dlp` model, caching, and quirks |
+| [Cross-Device Sync](docs/sync.md) | Share history across machines via a cloud folder |
+| [Development](docs/development.md) | Build, test, and release |
 
-Current behavior is intentionally pragmatic:
+## Requirements
 
-- YouTube uses a download-first cached path for reliability
-- YouTube livestreams (`live_status: is_live`) are auto-detected and routed to a
-  stream-first path with looping disabled; scheduled-but-not-yet-live URLs fail
-  fast with a helpful message instead of hanging
-- SoundCloud and HypeM prefer a stream-first path and fall back to cached download when needed
+- macOS or Linux
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) + [`ffmpeg`](https://ffmpeg.org) for YouTube / SoundCloud / HypeM (auto-installed by Homebrew)
+- Spotify needs neither — just a Premium account and a one-time login
 
-## How Spotify Playback Works
+## License
 
-Spotify is fundamentally different from the `yt-dlp`-backed services. Spotify
-exposes no downloadable audio, so looper uses
-[librespot](https://github.com/librespot-org/librespot) — the open-source
-implementation of the Spotify Connect protocol — to play full tracks. This is
-the same library [spotify-player](https://github.com/aome510/spotify-player)
-uses, and it has real constraints:
-
-- **Premium is required.** librespot authenticates as a Spotify Connect device;
-  free accounts can't stream through it.
-- **OAuth login, once.** `looper spotify login` runs an OAuth browser flow and
-  caches reusable credentials under the cache directory. No password is stored.
-- **Audio is decoded in-process.** The DRM Ogg/Vorbis stream is decrypted and
-  decoded by librespot, and its PCM is bridged straight into looper's audio
-  pipeline and FFT visualizer. There is no MP3 on disk like the other services.
-- **Looping** re-loads the track when it ends (single track) or advances to the
-  next track and loops the whole collection (playlist/album).
-- **Album art** is fetched from Spotify's public image CDN and shown in the
-  visualizer and the OS Now Playing widget, like the other services.
-- **Connection resilience:** librespot's session doesn't auto-reconnect, so
-  looper rebuilds it from cached credentials when it goes stale (sleep/wake,
-  network change). Playback recovers at the next track rather than failing.
-- **Caveats:** there's a brief loading screen between playlist tracks (no
-  background prefetch for Spotify), and an unavailable track (removed or
-  region-locked) shows the "track unavailable" modal instead of playing. A
-  single track looping forever won't recover from a mid-loop disconnect until
-  restart.
-
-Note: librespot is a reverse-engineered client. Using it is for personal use and
-is technically outside Spotify's Terms of Service.
-
-## Now Playing & Media Keys
-
-looper registers with the OS media session, so whatever it's playing shows up in
-the system **Now Playing** surface — macOS Control Center, the lock screen, and
-AirPods/keyboard controls; Linux MPRIS clients — with full metadata:
-
-| Field | Where it comes from |
-|-------|---------------------|
-| Title | the track title |
-| Artist | the real artist when the source provides one (Spotify, and YouTube/SoundCloud/HypeM via `yt-dlp`); falls back to the service name |
-| Album | the playlist or album name, when playing one |
-| Artwork | the Spotify cover, the YouTube/SoundCloud/HypeM thumbnail, or — for local files, which have no embedded art — a bundled fallback cover so the widget is never blank |
-
-Media keys work even while looper is in the background:
-
-| Key | Action |
-|-----|--------|
-| Play / Pause | Toggle pause |
-| Next | Skip to the next track (playlist mode) |
-| Previous | Skip to the previous track (playlist mode) |
-
-On macOS this uses `MPRemoteCommandCenter` + `MPNowPlayingInfoCenter`; on Linux,
-MPRIS over D-Bus. Windows is not wired up.
-
-## Data and Cache Locations
-
-Remote tracks are cached locally after download:
-
-| Platform | Cache directory |
-|----------|----------------|
-| macOS | `~/Library/Caches/sh.kbr.looper/` |
-| Linux | `~/.cache/looper/` |
-
-Spotify keeps its cached credentials, encrypted audio cache, and album art in a
-`spotify/` subfolder of the cache directory above.
-
-Playback history and favorites live in a SQLite database (`looper.sqlite3`). Where it lives depends on your sync setup — see [Cross-Device Sync](#cross-device-sync) below.
-
-- startup applies pending embedded migrations automatically — no manual steps needed when upgrading
-- bare `looper` loads this history first and lets you replay from it
-- history is tracked per playable URL or canonical local file path
-- each track stores title, platform, favorite state, last played timestamp, play count, cumulative time played, and which computer played it last
-
-## Cross-Device Sync
-
-looper always reads and writes a fast local copy of `looper.sqlite3`. If you point it at a cloud folder (iCloud Drive, Dropbox, anything that syncs files), looper will pull from that folder at startup and push to it on quit. The cloud folder never holds the live database — it's just a passive copy that the cloud provider replicates between your machines on its own.
-
-This avoids the long-standing footguns of running SQLite directly on a cloud-synced filesystem (corrupted WAL/SHM sidecars, surprise permission denials, evicted files).
-
-### Where the live database lives
-
-| Platform | Live database path |
-|----------|--------------------|
-| macOS | `~/Library/Application Support/sh.kbr.looper/looper.sqlite3` |
-| Linux | `~/.local/share/looper/looper.sqlite3` |
-
-By default no replication runs. Looper just uses the local path above.
-
-### Replicate via a cloud folder
-
-Point looper at any folder your cloud provider keeps in sync:
-
-```shell
-looper config set sync-folder "$HOME/Library/Mobile Documents/com~apple~CloudDocs/looper"
-# Replication folder set to: ...
-# looper will pull from this folder at startup and push to it on quit.
-# The live DB stays at the platform data directory.
-```
-
-Run this once on each computer that should share history. The cloud provider takes care of moving `looper.sqlite3` between machines in the background.
-
-**Verify it's working:**
-
-```shell
-looper config show
-# sync_folder = /Users/you/Library/Mobile Documents/.../looper (replicated on startup/quit)
-
-ls "$HOME/Library/Mobile Documents/com~apple~CloudDocs/looper/"
-# looper.sqlite3
-```
-
-### macOS: iCloud Drive needs Files-and-Folders permission
-
-The first time looper tries to read or write inside `~/Library/Mobile Documents/...`, macOS will silently deny access until you grant the terminal app that launches looper permission. Open **System Settings → Privacy & Security → Files and Folders** (or **Full Disk Access**) and toggle on **iCloud Drive** for your terminal (Terminal, iTerm, Ghostty, etc.). Restart the terminal so the new entitlement takes effect.
-
-If permission isn't granted, looper still runs against the local DB, surfaces a `History sync disabled` banner at startup, and prints a one-line warning to stderr on quit. Nothing crashes.
-
-### Sync semantics: last-quitter wins
-
-Replication is a file copy in both directions:
-
-- **At startup**: if the cloud copy has a more recent `MAX(last_played_at)` than the local copy, looper replaces local with the cloud copy.
-- **At quit**: looper checkpoints the WAL, then atomically replaces the cloud copy with the local one.
-
-This is enough for one-human-at-a-time use across multiple Macs (typical single-user setup). It is **not** a general-purpose multi-master merge: if you play on two machines simultaneously, whichever quits last overwrites the other's session, and your cloud provider may produce conflict copies (e.g. `looper.sqlite3 conflicted-copy 2`). Resolve by closing one, picking the version you want to keep, and deleting the rest.
-
-### Disable replication
-
-```shell
-rm "$HOME/.config/looper/sync_folder"
-```
-
-Or just don't set it. Looper falls back to local-only without complaint.
-
-## Keys
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Replay the selected track from the default history browser |
-| `Space` | Pause / Resume |
-| `Left` / `Right` | Seek backward / forward 5 seconds |
-| Click / drag progress bar | Scrub to any position (commits on release) |
-| `f` | Toggle fullscreen visualizer |
-| `s` | Toggle favorite for the currently playing track |
-| `p` | Toggle the played-songs panel |
-| `Cmd-P` | Attempt to toggle the played-songs panel when the terminal forwards the modifier |
-| `q` / `Ctrl-C` | Quit |
-
-Seeking (arrow keys or progress-bar drag) is available for local files and
-cached downloads. Live or stream-first sources ignore seek input.
-
-### Played-Songs Panel
-
-Bare `looper` opens directly into playlist history. During playback, the played-songs panel is hidden by default and opens over the minimal UI.
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Move selection down / up |
-| `h` / `l` | Change sort field |
-| `r` | Reverse sort direction |
-| `s` | Toggle favorite for the selected row |
-| `Enter` | Replay the selected track |
-| `p` / `Esc` | Close the panel |
-
-Sort fields:
-
-- time played
-- last played
-- platform
-- title
-- times played
-
-## Development
-
-```shell
-make run           # play fixture file (tests/fixtures/sound.mp3)
-make test          # run tests
-make build         # debug build
-make build-release # optimized release binary
-```
-
-Useful direct commands:
-
-```shell
-cargo build
-cargo build --release
-cargo test
-```
-
-## Notes
-
-- Public online URLs work best. Private, age-restricted, or members-only content may still fail depending on `yt-dlp` access.
-- If a YouTube watch URL includes both `v=` and `list=`, `looper` currently normalizes it toward single-video playback unless you use the playlist URL directly.
-- The remote loading UI is designed to hand off into playback cleanly rather than waiting on a full silent download.
-- The startup screen and loading copy are intentionally a little cheeky.
-
-## Releasing
-
-```shell
-make release-patch    # bump patch version (0.5.x → 0.5.x+1) and release
-make release-minor    # bump minor version (0.5.x → 0.6.0) and release
-make smoke-test       # (optional) verify the published formula installs cleanly
-```
-
-`make release-patch` / `make release-minor` runs end-to-end:
-
-1. Bumps the version in `Cargo.toml` and commits it
-2. Tags `v<version>` and pushes the tag
-3. The `Release` GitHub Actions workflow (`.github/workflows/release.yml`) fires on the tag, builds an `aarch64-apple-darwin` binary on a `macos-14` runner, and attaches it to the GitHub release
-4. `make bump-formula` (auto-invoked) polls the release, computes the SHA256, regenerates the Homebrew formula via `scripts/render-formula.sh`, and pushes the update to [`program247365/homebrew-tap`](https://github.com/program247365/homebrew-tap)
-
-Total wall-clock time is typically 3–4 minutes (most of it the arm64 cargo build on CI).
-
-`make smoke-test` then reinstalls the formula on your machine and asserts:
-
-- the formula uses the prebuilt-binary install path (`bin.install "looper"`)
-- the tap version matches `Cargo.toml`
-- `looper --help` runs successfully
-
-If you need to recover from a partial release (e.g. CI flaked between tag push and formula update), re-run `make bump-formula` directly — it is idempotent and will wait for the asset, then push to the tap.
+[MIT](LICENSE) · Built in Rust with [ratatui](https://ratatui.rs) · [kbr.sh/looper](https://kbr.sh/looper)
