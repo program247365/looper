@@ -107,6 +107,7 @@ fn browse_history_session(
         selected: 0,
         sort_field: HistorySortField::TimePlayed,
         descending: true,
+        pending_delete: false,
     };
     refresh_history_panel(&mut panel, &storage)?;
 
@@ -147,6 +148,25 @@ fn browse_history_session(
                             storage.lock().unwrap().toggle_favorite(&row.track_key)?;
                             refresh_history_panel(&mut panel, &storage)?;
                         }
+                    }
+                    KeyCommand::HistoryDelete => {
+                        if !panel.rows.is_empty() {
+                            panel.pending_delete = true;
+                        }
+                    }
+                    KeyCommand::HistoryDeleteConfirm => {
+                        if let Some(row) = panel.rows.get(panel.selected) {
+                            let replay_target = row.replay_target.clone();
+                            storage
+                                .lock()
+                                .unwrap()
+                                .delete_by_replay_target(&replay_target)?;
+                        }
+                        panel.pending_delete = false;
+                        refresh_history_panel(&mut panel, &storage)?;
+                    }
+                    KeyCommand::HistoryDeleteCancel => {
+                        panel.pending_delete = false;
                     }
                     KeyCommand::HistoryReplay => {
                         if let Some(row) = panel.rows.get(panel.selected) {
@@ -676,6 +696,37 @@ fn dispatch_command(
             *needs_render = true;
             Ok(None)
         }
+        KeyCommand::HistoryDelete => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                if !panel.rows.is_empty() {
+                    panel.pending_delete = true;
+                    *needs_render = true;
+                }
+            }
+            Ok(None)
+        }
+        KeyCommand::HistoryDeleteConfirm => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                if let Some(row) = panel.rows.get(panel.selected) {
+                    let replay_target = row.replay_target.clone();
+                    storage
+                        .lock()
+                        .unwrap()
+                        .delete_by_replay_target(&replay_target)?;
+                }
+                panel.pending_delete = false;
+                refresh_history_panel(panel, storage)?;
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::HistoryDeleteCancel => {
+            if let Some(panel) = state.history_panel.as_mut() {
+                panel.pending_delete = false;
+                *needs_render = true;
+            }
+            Ok(None)
+        }
         KeyCommand::None => Ok(None),
     }
 }
@@ -813,10 +864,19 @@ pub(crate) enum KeyCommand {
     HistoryReverse,
     HistoryReplay,
     HistoryToggleFavorite,
+    HistoryDelete,
+    HistoryDeleteConfirm,
+    HistoryDeleteCancel,
 }
 
 fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
-    if state.history_panel.is_some() {
+    if let Some(panel) = &state.history_panel {
+        if panel.pending_delete {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => KeyCommand::HistoryDeleteConfirm,
+                _ => KeyCommand::HistoryDeleteCancel,
+            };
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('p'), _) => KeyCommand::ToggleHistory,
             (KeyCode::Char('j'), _) => KeyCommand::HistoryNext,
@@ -825,6 +885,7 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
             (KeyCode::Char('h'), _) => KeyCommand::HistorySortPrev,
             (KeyCode::Char('r'), _) => KeyCommand::HistoryReverse,
             (KeyCode::Char('s'), _) => KeyCommand::HistoryToggleFavorite,
+            (KeyCode::Char('d'), _) if !panel.rows.is_empty() => KeyCommand::HistoryDelete,
             (KeyCode::Enter, _) => KeyCommand::HistoryReplay,
             (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 KeyCommand::Quit
@@ -853,6 +914,12 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
 }
 
 fn handle_history_browser_key_event(key: KeyEvent, panel: &HistoryPanelState) -> KeyCommand {
+    if panel.pending_delete {
+        return match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => KeyCommand::HistoryDeleteConfirm,
+            _ => KeyCommand::HistoryDeleteCancel,
+        };
+    }
     match (key.code, key.modifiers) {
         (KeyCode::Char('j'), _) => KeyCommand::HistoryNext,
         (KeyCode::Char('k'), _) => KeyCommand::HistoryPrev,
@@ -860,6 +927,7 @@ fn handle_history_browser_key_event(key: KeyEvent, panel: &HistoryPanelState) ->
         (KeyCode::Char('h'), _) => KeyCommand::HistorySortPrev,
         (KeyCode::Char('r'), _) => KeyCommand::HistoryReverse,
         (KeyCode::Char('s'), _) if !panel.rows.is_empty() => KeyCommand::HistoryToggleFavorite,
+        (KeyCode::Char('d'), _) if !panel.rows.is_empty() => KeyCommand::HistoryDelete,
         (KeyCode::Enter, _) if !panel.rows.is_empty() => KeyCommand::HistoryReplay,
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyCommand::Quit,
         _ => KeyCommand::None,
@@ -877,6 +945,7 @@ fn toggle_history_panel(state: &mut AppState, storage: &SharedStorage) -> Result
         selected: 0,
         sort_field: HistorySortField::TimePlayed,
         descending: true,
+        pending_delete: false,
     };
     refresh_history_panel(&mut panel, storage)?;
     state.history_panel = Some(panel);
@@ -1767,6 +1836,7 @@ mod tests {
             selected: 0,
             sort_field: HistorySortField::TimePlayed,
             descending: true,
+            pending_delete: false,
         });
 
         assert_eq!(
@@ -1825,6 +1895,7 @@ mod tests {
             selected: 0,
             sort_field: HistorySortField::TimePlayed,
             descending: true,
+            pending_delete: false,
         };
 
         assert_eq!(
@@ -1850,6 +1921,7 @@ mod tests {
             selected: 0,
             sort_field: HistorySortField::TimePlayed,
             descending: true,
+            pending_delete: false,
         };
 
         assert_eq!(
@@ -1858,6 +1930,84 @@ mod tests {
                 &panel
             ),
             KeyCommand::None
+        );
+    }
+
+    fn panel_with_one_row(pending_delete: bool) -> HistoryPanelState {
+        HistoryPanelState {
+            rows: vec![HistoryRow {
+                track_key: "a".into(),
+                replay_target: "a".into(),
+                title: "A".into(),
+                platform: "Local".into(),
+                is_favorite: false,
+                play_count: 1,
+                total_play_seconds: 10,
+                first_played_at: 0,
+                last_played_at: 0,
+                last_played_computer: String::new(),
+            }],
+            selected: 0,
+            sort_field: HistorySortField::TimePlayed,
+            descending: true,
+            pending_delete,
+        }
+    }
+
+    #[test]
+    fn history_browser_arms_delete_with_d() {
+        let panel = panel_with_one_row(false);
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::HistoryDelete
+        );
+    }
+
+    #[test]
+    fn history_browser_ignores_delete_when_empty() {
+        let panel = HistoryPanelState {
+            rows: Vec::new(),
+            selected: 0,
+            sort_field: HistorySortField::TimePlayed,
+            descending: true,
+            pending_delete: false,
+        };
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::None
+        );
+    }
+
+    #[test]
+    fn pending_delete_routes_y_to_confirm_and_other_to_cancel() {
+        let panel = panel_with_one_row(true);
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::HistoryDeleteConfirm
+        );
+        // Any non-`y` key cancels — including keys that normally do something.
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::HistoryDeleteCancel
+        );
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::HistoryDeleteCancel
         );
     }
 }

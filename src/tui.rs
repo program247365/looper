@@ -75,6 +75,8 @@ pub struct HistoryPanelState {
     pub selected: usize,
     pub sort_field: HistorySortField,
     pub descending: bool,
+    /// When true, the selected row is awaiting a delete confirmation ([y]/[n]).
+    pub pending_delete: bool,
 }
 
 #[derive(Clone)]
@@ -1231,9 +1233,9 @@ fn draw_history_table(
         if panel.descending { "↓" } else { "↑" }
     );
     let controls = if area == frame.area() {
-        "  •  j/k move  h/l sort  r reverse  s star  enter replay  q quit"
+        "  •  j/k move  h/l sort  r reverse  s star  d delete  enter replay  q quit"
     } else {
-        "  •  j/k move  h/l sort  r reverse  s star  enter replay  p/esc close"
+        "  •  j/k move  h/l sort  r reverse  s star  d delete  enter replay  p/esc close"
     };
     let header = vec![Line::from(vec![
         Span::styled(
@@ -1322,6 +1324,68 @@ fn draw_history_table(
         )])]),
         chunks[2],
     );
+
+    if panel.pending_delete {
+        if let Some(row) = panel.rows.get(panel.selected) {
+            draw_delete_confirm(frame, area, &row.title);
+        }
+    }
+}
+
+/// Renders the delete-confirmation modal centered over the history panel. The
+/// caller arms this via `HistoryPanelState::pending_delete`; `y` confirms and
+/// any other key cancels (handled in the key router, not here).
+fn draw_delete_confirm(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, title: &str) {
+    let modal = centered_area(area, 60, 9);
+    frame.render_widget(Clear, modal);
+    let truncated = truncate_str(title, 54);
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "Remove this track from your history?",
+            Style::default()
+                .fg(Color::Rgb(255, 180, 80))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            truncated,
+            Style::default()
+                .fg(Color::Rgb(230, 230, 240))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[y]",
+                Style::default()
+                    .fg(Color::Rgb(255, 120, 100))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" delete    ", Style::default().fg(Color::Rgb(150, 150, 170))),
+            Span::styled(
+                "[n]",
+                Style::default()
+                    .fg(Color::Rgb(120, 200, 140))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" keep", Style::default().fg(Color::Rgb(150, 150, 170))),
+        ]),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" confirm delete ")
+        .style(Style::default().fg(Color::Rgb(170, 90, 90)));
+    frame.render_widget(Paragraph::new(lines).block(block), modal);
+}
+
+/// Truncates a string to `max` characters, appending an ellipsis when cut.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{kept}…")
+    }
 }
 
 fn centered_rect(
@@ -1429,6 +1493,7 @@ mod tests {
             selected: 0,
             sort_field: HistorySortField::TimePlayed,
             descending: true,
+            pending_delete: false,
         };
         let warning = sample_warning();
         terminal
