@@ -24,6 +24,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 serde_json = "1"
 spectrum-analyzer = "1.7"
 stream-download = { version = "0.22", features = ["process"] }
+# Blocking HTTP client for the HypeM artwork scrape (its yt-dlp extractor
+# exposes no thumbnail). Uses the same native-tls backend already pulled in by
+# stream-download's reqwest, so `blocking` is purely additive.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
 symphonia = { version = "0.5", default-features = false }
 rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "wav", "flac", "vorbis"] }
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }

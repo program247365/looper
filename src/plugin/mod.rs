@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::playback_input::{PendingDownload, PlaybackInput};
 
-mod hypem;
+pub mod hypem;
 mod soundcloud;
 mod youtube;
 pub mod ytdlp;

@@ -48,6 +48,11 @@ pub struct AppState {
     pub history_panel: Option<HistoryPanelState>,
     pub sync_warning: Option<SyncWarning>,
     pub thumbnail: Option<StatefulProtocol>,
+    /// Display width (in terminal columns) the album art occupies at
+    /// [`HEADER_ART_ROWS`] tall. Computed from the source aspect ratio so the
+    /// header metadata can sit flush against the art's right edge regardless of
+    /// whether the cover is square (Spotify) or 16:9 (YouTube/SoundCloud).
+    pub thumbnail_cols: u16,
     pub is_live: bool,
     /// Geometry of the playback progress bar from the most recent render, used
     /// to map mouse clicks/drags onto a seek position. `None` when no bar is on
@@ -142,6 +147,10 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
 /// Height (in rows) consumed by the sync-warning banner when present.
 /// Bordered box: 1 top border + 5 content lines + 1 bottom border.
 const SYNC_WARNING_HEIGHT: u16 = 7;
+
+/// Rows the album art occupies inside the header box (which adds 2 border rows).
+/// The art is height-constrained to this; its width follows the aspect ratio.
+pub const HEADER_ART_ROWS: u16 = 6;
 
 pub fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     frame.render_widget(Clear, frame.area());
@@ -615,52 +624,55 @@ pub fn draw_history_browser(
 }
 
 fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &mut AppState) {
+    // When a thumbnail is loaded, the header box grows to anchor the album art
+    // on the left with the Now Playing metadata beside it. Without art the
+    // header keeps its compact two-line height. Either way the visualizer
+    // below spans the full width.
+    let has_thumb = state.thumbnail.is_some();
+    let header_height = if has_thumb { HEADER_ART_ROWS + 2 } else { 4 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // header
-            Constraint::Min(0),    // visualizer — takes all remaining space
-            Constraint::Length(3), // progress bar
-            Constraint::Length(3), // footer
+            Constraint::Length(header_height), // header (+ art when present)
+            Constraint::Min(0),                // visualizer — full width
+            Constraint::Length(3),             // progress bar
+            Constraint::Length(3),             // footer
         ])
         .split(area);
 
-    draw_header(frame, chunks[0], state);
+    let image_area = if has_thumb {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Rgb(60, 60, 80)));
+        let inner = block.inner(chunks[0]);
+        frame.render_widget(block, chunks[0]);
 
-    // If a thumbnail is loaded, dedicate a 34-column gutter on the left to
-    // it and let the visualizer flex into the remaining space. The image
-    // itself is 32x9 char cells (16:9 in halfblock pixels — exact aspect
-    // match for typical YouTube/SoundCloud thumbnails), vertically centered
-    // in the gutter with 1-char horizontal margins. Negative space above
-    // and below is intentional: it makes the image read as an anchor rather
-    // than a corner sticker.
-    let (image_area, scatter_area) = if state.thumbnail.is_some() {
-        let outer = Layout::default()
+        // Art gutter sized to the art's actual rendered width (from its aspect
+        // ratio), so the metadata sits flush against the cover's right edge with
+        // consistent spacing whether the cover is square or 16:9. The metadata's
+        // own leading indent supplies the gap.
+        let art_cols = state.thumbnail_cols.max(1);
+        let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(34), Constraint::Min(20)])
-            .split(chunks[1]);
-        let vertical = Layout::default()
+            .constraints([Constraint::Length(art_cols), Constraint::Min(0)])
+            .split(inner);
+        // Vertically center the two metadata lines within the taller header.
+        let text_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Length(9),
+                Constraint::Length(2),
                 Constraint::Min(0),
             ])
-            .split(outer[0]);
-        let horizontal = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(32),
-                Constraint::Length(1),
-            ])
-            .split(vertical[1]);
-        (Some(horizontal[1]), outer[1])
+            .split(columns[1]);
+        frame.render_widget(Paragraph::new(header_lines(state)), text_rows[1]);
+        Some(columns[0])
     } else {
-        (None, chunks[1])
+        draw_header(frame, chunks[0], state);
+        None
     };
 
-    draw_scatter(frame, scatter_area, state, true);
+    draw_scatter(frame, chunks[1], state, true);
     draw_progress(frame, chunks[2], state);
     draw_footer(frame, chunks[3]);
 
@@ -689,6 +701,17 @@ fn draw_fullscreen_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, s
 // ── Header ────────────────────────────────────────────────────────────────────
 
 fn draw_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Rgb(60, 60, 80)));
+    frame.render_widget(Paragraph::new(header_lines(state)).block(block), area);
+}
+
+/// Builds the two-line Now Playing header: service badge, favorite star,
+/// title, and play status on top; collection/loop info, cache badge, and the
+/// fullscreen hint below. Shared by the plain header and the art-anchored
+/// header so both stay in sync.
+fn header_lines(state: &AppState) -> Vec<Line<'static>> {
     let (status_text, status_color) = if state.paused {
         ("⏸  PAUSED", Color::Yellow)
     } else if state.is_live {
@@ -758,11 +781,7 @@ fn draw_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &
         ]),
     ];
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Rgb(60, 60, 80)));
-
-    frame.render_widget(Paragraph::new(text).block(block), area);
+    text
 }
 
 // ── Scatter visualizer ────────────────────────────────────────────────────────

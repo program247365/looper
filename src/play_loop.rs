@@ -27,11 +27,12 @@ use crate::audio::AudioPlayer;
 use crate::download::{DownloadEvent, LoadingPhase};
 use crate::media_controls::MediaSessionHandle;
 use crate::playback_input::PlaybackInput;
-use crate::plugin::{self, ytdlp, TrackInfo};
+use crate::plugin::{self, hypem, ytdlp, TrackInfo};
 use crate::storage::{track_record, HistorySortField, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
     draw, draw_history_browser, draw_replay_error, draw_startup, restore_terminal, setup_terminal,
-    AppState, HistoryPanelState, ProgressTrack, StartupProgressState, StartupScreenState, N_BANDS,
+    AppState, HistoryPanelState, ProgressTrack, StartupProgressState, StartupScreenState,
+    HEADER_ART_ROWS, N_BANDS,
 };
 
 const SEEK_STEP: Duration = Duration::from_secs(5);
@@ -199,11 +200,13 @@ fn browse_history_session(
     }
 }
 
-/// Path to the bundled fallback album cover for local files, which have no
-/// embedded art. The PNG is embedded in the binary and materialized into the
-/// cache on first use, so a Homebrew-installed binary needs no external asset.
-/// Best-effort: `None` if it can't be written (then the cover is simply blank).
-fn local_file_cover() -> Option<std::path::PathBuf> {
+/// Path to the bundled fallback album cover, used for any track with no
+/// artwork — local files (no embedded art) and remote sources whose extractor
+/// exposes no thumbnail (e.g. HypeM: yt-dlp can play it but its extractor
+/// returns no `thumbnail` field). The PNG is embedded in the binary and
+/// materialized into the cache on first use, so a Homebrew-installed binary
+/// needs no external asset. Best-effort: `None` if it can't be written.
+fn fallback_cover() -> Option<std::path::PathBuf> {
     const COVER: &[u8] = include_bytes!("../assets/local-cover.png");
     let path = plugin::cache_dir_path().ok()?.join("local-cover.png");
     if !path.exists() {
@@ -266,7 +269,7 @@ fn play_file_session(
                     service: None,
                     // Local files have no embedded art; use the bundled fallback
                     // cover so the macOS Now Playing widget is never blank.
-                    thumbnail_path: local_file_cover(),
+                    thumbnail_path: fallback_cover(),
                     is_live: false,
                     collection: None,
                     artist: None,
@@ -1188,16 +1191,31 @@ fn loop_playlist(
     }
 }
 
-/// Open and decode a thumbnail image into a ratatui-image stateful protocol.
+/// Open and decode a thumbnail image into a ratatui-image stateful protocol,
+/// plus the terminal-column width it will occupy at [`HEADER_ART_ROWS`] tall.
 /// Returns None if any step fails — the renderer treats that as "no image."
+///
+/// The width is derived from the source aspect ratio and the terminal's
+/// cell pixel size: at a fixed cell height, `cols = rows · (cell_h/cell_w) ·
+/// (img_w/img_h)`. Sizing the art column to this lets the header metadata sit
+/// flush against the cover regardless of square vs. 16:9 art.
 fn decode_thumbnail(
     picker: Option<&Picker>,
     path: Option<&Path>,
-) -> Option<ratatui_image::protocol::StatefulProtocol> {
+) -> Option<(ratatui_image::protocol::StatefulProtocol, u16)> {
     let picker = picker?;
     let path = path?;
     let dyn_img = image::ImageReader::open(path).ok()?.decode().ok()?;
-    Some(picker.new_resize_protocol(dyn_img))
+    let aspect = if dyn_img.height() > 0 {
+        dyn_img.width() as f32 / dyn_img.height() as f32
+    } else {
+        1.0
+    };
+    let (cell_w, cell_h) = picker.font_size();
+    let cols = (HEADER_ART_ROWS as f32 * (cell_h as f32 / cell_w as f32) * aspect)
+        .round()
+        .clamp(1.0, 40.0) as u16;
+    Some((picker.new_resize_protocol(dyn_img), cols))
 }
 
 fn play_single_track(
@@ -1255,7 +1273,18 @@ fn play_single_track(
     }
     let is_favorite = storage.lock().unwrap().favorite_for(&record.track_key)?;
 
-    let thumbnail = decode_thumbnail(picker, track.thumbnail_path.as_deref());
+    // Any track that still has no artwork (e.g. HypeM, whose yt-dlp extractor
+    // exposes no thumbnail) falls back to the bundled cover so the header art
+    // box renders consistently rather than collapsing to the compact layout.
+    if track.thumbnail_path.is_none() {
+        track.thumbnail_path = fallback_cover();
+    }
+
+    let (thumbnail, thumbnail_cols) = match decode_thumbnail(picker, track.thumbnail_path.as_deref())
+    {
+        Some((protocol, cols)) => (Some(protocol), cols),
+        None => (None, 0),
+    };
 
     let mut state = AppState {
         filename: track.title.clone(),
@@ -1281,6 +1310,7 @@ fn play_single_track(
         history_panel: None,
         sync_warning: sync_warning.cloned(),
         thumbnail,
+        thumbnail_cols,
         is_live: track.is_live,
         progress_track: None,
         scrub_preview: None,
@@ -1452,7 +1482,10 @@ fn prepare_track_for_playback(
     {
         if let Some(source_url) = track.source_url.clone() {
             if let Ok(cache_dir) = plugin::cache_dir_path() {
-                track.thumbnail_path = ytdlp::fetch_thumbnail(&source_url, &cache_dir);
+                // yt-dlp covers SoundCloud; HypeM's extractor has no thumbnail,
+                // so fall back to scraping its page's og:image.
+                track.thumbnail_path = ytdlp::fetch_thumbnail(&source_url, &cache_dir)
+                    .or_else(|| hypem::fetch_thumbnail(&source_url, &cache_dir));
             }
         }
     }
@@ -1730,6 +1763,7 @@ mod tests {
             history_panel: None,
             sync_warning: None,
             thumbnail: None,
+            thumbnail_cols: 0,
             is_live: false,
             progress_track: None,
             scrub_preview: None,

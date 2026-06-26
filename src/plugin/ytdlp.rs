@@ -245,6 +245,10 @@ pub fn fetch_thumbnail(url: &str, cache_dir: &Path) -> Option<PathBuf> {
     let output_template = cache_dir.join("%(id)s.%(ext)s");
     let output = Command::new("yt-dlp")
         .arg("--skip-download")
+        // `--print` implies `--simulate`, which suppresses ALL file writes
+        // (including `--write-thumbnail`). `--no-simulate` re-enables the write
+        // while still printing the id we use to locate the cached file.
+        .arg("--no-simulate")
         .arg("--write-thumbnail")
         .arg("--convert-thumbnails")
         .arg("jpg")
