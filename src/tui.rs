@@ -46,6 +46,7 @@ pub struct AppState {
     pub frame_count: u64,
     pub cache_status: Option<CacheStatus>,
     pub history_panel: Option<HistoryPanelState>,
+    pub search_panel: Option<SearchPanelState>,
     pub sync_warning: Option<SyncWarning>,
     pub thumbnail: Option<StatefulProtocol>,
     /// Display width (in terminal columns) the album art occupies at
@@ -82,6 +83,94 @@ pub struct HistoryPanelState {
     pub descending: bool,
     /// When true, the selected row is awaiting a delete confirmation ([y]/[n]).
     pub pending_delete: bool,
+}
+
+/// In-TUI Spotify search overlay. Opened with `/` from the playback screen or
+/// the history browser; closed with Esc.
+pub struct SearchPanelState {
+    pub input: String,
+    pub focus: SearchFocus,
+    /// Flattened section headers + selectable items, in render order.
+    pub entries: Vec<SearchEntry>,
+    /// Index into `entries`; always points at an `Item`, never a `Header`.
+    pub selected: usize,
+    pub status: SearchStatus,
+    /// True after a first `g` in results focus, waiting for the second.
+    pub pending_g: bool,
+}
+
+impl SearchPanelState {
+    pub fn new() -> Self {
+        SearchPanelState {
+            input: String::new(),
+            focus: SearchFocus::Query,
+            entries: Vec::new(),
+            selected: 0,
+            status: SearchStatus::Idle,
+            pending_g: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SearchFocus {
+    Query,
+    Results,
+}
+
+pub enum SearchStatus {
+    Idle,
+    Searching,
+    Error(String),
+}
+
+pub enum SearchEntry {
+    Header(&'static str),
+    Item(crate::spotify::SearchItem),
+}
+
+pub fn flatten_results(results: crate::spotify::SearchResults) -> Vec<SearchEntry> {
+    let mut entries = Vec::new();
+    for (header, items) in [
+        ("SONGS", results.tracks),
+        ("ALBUMS", results.albums),
+        ("PLAYLISTS", results.playlists),
+    ] {
+        if items.is_empty() {
+            continue;
+        }
+        entries.push(SearchEntry::Header(header));
+        entries.extend(items.into_iter().map(SearchEntry::Item));
+    }
+    entries
+}
+
+fn is_item(entry: &SearchEntry) -> bool {
+    matches!(entry, SearchEntry::Item(_))
+}
+
+pub fn first_item(entries: &[SearchEntry]) -> Option<usize> {
+    entries.iter().position(is_item)
+}
+
+pub fn last_item(entries: &[SearchEntry]) -> Option<usize> {
+    entries.iter().rposition(is_item)
+}
+
+/// Next selectable index after `from`, skipping headers; pinned at the last item.
+pub fn next_item(entries: &[SearchEntry], from: usize) -> usize {
+    entries
+        .iter()
+        .enumerate()
+        .skip(from + 1)
+        .find(|(_, e)| is_item(e))
+        .map(|(i, _)| i)
+        .unwrap_or(from)
+}
+
+/// Previous selectable index before `from`, skipping headers; pinned at the first item.
+pub fn prev_item(entries: &[SearchEntry], from: usize) -> usize {
+    entries[..from].iter().rposition(is_item).unwrap_or(from)
 }
 
 #[derive(Clone)]
@@ -1475,6 +1564,56 @@ mod tests {
             }
         }
         false
+    }
+
+    fn item(title: &str) -> crate::spotify::SearchItem {
+        crate::spotify::SearchItem {
+            title: title.into(),
+            byline: String::new(),
+            detail: String::new(),
+            uri: format!("spotify:track:{title}"),
+        }
+    }
+
+    fn sample_entries() -> Vec<SearchEntry> {
+        vec![
+            SearchEntry::Header("SONGS"),
+            SearchEntry::Item(item("a")),
+            SearchEntry::Item(item("b")),
+            SearchEntry::Header("ALBUMS"),
+            SearchEntry::Item(item("c")),
+        ]
+    }
+
+    #[test]
+    fn search_navigation_skips_headers() {
+        let entries = sample_entries();
+        assert_eq!(first_item(&entries), Some(1));
+        assert_eq!(last_item(&entries), Some(4));
+        assert_eq!(next_item(&entries, 1), 2);
+        assert_eq!(next_item(&entries, 2), 4); // hops the ALBUMS header
+        assert_eq!(next_item(&entries, 4), 4); // pinned at end
+        assert_eq!(prev_item(&entries, 4), 2); // hops back over the header
+        assert_eq!(prev_item(&entries, 1), 1); // pinned at start
+    }
+
+    #[test]
+    fn flatten_skips_empty_sections() {
+        let results = crate::spotify::SearchResults {
+            tracks: vec![item("t")],
+            albums: Vec::new(),
+            playlists: vec![item("p")],
+        };
+        let entries = flatten_results(results);
+        let headers: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| match e {
+                SearchEntry::Header(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["SONGS", "PLAYLISTS"]);
+        assert_eq!(entries.len(), 4);
     }
 
     fn sample_warning() -> SyncWarning {
