@@ -2792,6 +2792,7 @@ dependencies = [
  "ratatui-image",
  "reqwest",
  "rodio",
+ "serde",
  "serde_json",
  "souvlaki",
  "spectrum-analyzer",

@@ -10,7 +10,10 @@
 //! metadata resolution and playback. Credentials come from an OAuth login run
 //! once via `looper spotify login`.
 
+mod search;
 mod sink;
+
+pub use search::{search, SearchItem, SearchResults};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
