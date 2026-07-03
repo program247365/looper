@@ -267,6 +267,11 @@ pub fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if let Some(panel) = &state.history_panel {
         draw_history_panel(frame, state, panel);
     }
+
+    // Search draws last: it must sit on top if both panels are somehow open.
+    if let Some(panel) = &state.search_panel {
+        draw_search_overlay(frame, panel);
+    }
 }
 
 fn draw_sync_warning(
@@ -1299,6 +1304,127 @@ fn favorite_badge(is_favorite: bool) -> Span<'static> {
     } else {
         Span::raw("")
     }
+}
+
+pub fn draw_search_overlay(frame: &mut ratatui::Frame, panel: &SearchPanelState) {
+    let area = centered_rect(72, 72, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Rgb(90, 90, 120)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // title + controls
+            Constraint::Length(2), // query input
+            Constraint::Min(0),    // results / status
+        ])
+        .split(inner);
+
+    let controls = match panel.focus {
+        SearchFocus::Query => "  •  type to edit  enter search  esc close",
+        SearchFocus::Results => {
+            "  •  j/k move  gg/G top/bottom  / edit query  enter play  esc close"
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(vec![
+            Span::styled(
+                "Spotify Search",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(controls, Style::default().fg(Color::Rgb(150, 150, 170))),
+        ])]),
+        chunks[0],
+    );
+
+    let cursor = if panel.focus == SearchFocus::Query {
+        "▏"
+    } else {
+        ""
+    };
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(vec![
+            Span::styled("/ ", Style::default().fg(Color::Rgb(255, 180, 80))),
+            Span::styled(
+                format!("{}{cursor}", panel.input),
+                Style::default().fg(Color::White),
+            ),
+        ])]),
+        chunks[1],
+    );
+
+    match &panel.status {
+        SearchStatus::Searching => {
+            frame.render_widget(
+                Paragraph::new(vec![Line::from(Span::styled(
+                    "searching…",
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ))]),
+                chunks[2],
+            );
+            return;
+        }
+        SearchStatus::Error(message) => {
+            frame.render_widget(
+                Paragraph::new(vec![Line::from(Span::styled(
+                    message.clone(),
+                    Style::default().fg(Color::Rgb(230, 130, 130)),
+                ))]),
+                chunks[2],
+            );
+            return;
+        }
+        SearchStatus::Idle => {}
+    }
+
+    let dim = Style::default().fg(Color::Rgb(170, 175, 200));
+    let header_style = Style::default()
+        .fg(Color::Rgb(255, 180, 80))
+        .add_modifier(Modifier::BOLD);
+
+    // Keep the selection visible: scroll so `selected` stays inside the
+    // viewport (headers included in the row count).
+    let height = chunks[2].height as usize;
+    let skip = panel.selected.saturating_sub(height.saturating_sub(1));
+
+    let lines: Vec<Line> = panel
+        .entries
+        .iter()
+        .enumerate()
+        .skip(skip)
+        .take(height)
+        .map(|(index, entry)| match entry {
+            SearchEntry::Header(header) => Line::from(Span::styled(*header, header_style)),
+            SearchEntry::Item(item) => {
+                let selected = index == panel.selected && panel.focus == SearchFocus::Results;
+                let marker = if selected { "▸ " } else { "  " };
+                let row_style = if selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Rgb(210, 210, 225))
+                };
+                let mut spans = vec![Span::styled(format!("{marker}{}", item.title), row_style)];
+                if !item.byline.is_empty() {
+                    spans.push(Span::styled(format!("  {}", item.byline), dim));
+                }
+                if !item.detail.is_empty() {
+                    spans.push(Span::styled(format!("  {}", item.detail), dim));
+                }
+                Line::from(spans)
+            }
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), chunks[2]);
 }
 
 fn draw_history_panel(frame: &mut ratatui::Frame, _state: &AppState, panel: &HistoryPanelState) {
