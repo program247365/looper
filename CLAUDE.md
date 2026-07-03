@@ -157,6 +157,12 @@ uses librespot:
   - `ensure_track_available()` uses librespot's `AudioItem` availability to fail
     a single unplayable track at resolve time, so `resolve_url_with_startup`
     surfaces the "track unavailable" modal instead of playing silence
+- `src/spotify/search.rs` — catalog search via the public Web API (`/v1/search`),
+  authorized with a bearer token minted from the librespot session
+  (`session.token_provider().get_token(...)` — comma-separated scopes string).
+  Returns `SearchResults { tracks, albums, playlists }` of `SearchItem`s whose
+  `uri` is a valid `resolve()` target. Playlist `items` can contain literal
+  `null`s (post-2024 API changes) — the parser filters them.
 - `src/spotify/sink.rs` — the bridge. librespot's `Player` pushes decoded PCM
   into a custom `Sink`; a bounded channel carries it to a rodio `Source`. The
   sink blocks under backpressure (throttling the decoder to real time); the
@@ -200,6 +206,13 @@ There are now two major UI modes:
 - "track unavailable" modal (`draw_replay_error`) — non-fatal overlay shown when
   a replay target can't be resolved; `d` prunes the dead row, any other key
   returns to the history browser.
+- Spotify search overlay (`/` from playback or the history browser;
+  `draw_search_overlay`). Query focus: type, Enter searches (one blocking Web
+  API call; a "searching…" frame is drawn first), Esc closes. Results focus:
+  `j`/`k` move (headers are skipped), `gg`/`G` jump, `/` re-edits the query,
+  Enter plays the selection through the normal replay rail
+  (`LoopAction::ReplayTarget` in playback; `play_file_session` in the history
+  browser). While open the overlay captures all keys; only Ctrl-C quits.
 
 ### Playlist behavior
 

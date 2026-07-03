@@ -79,6 +79,7 @@ looper play --url "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
 | `f` | Toggle fullscreen visualizer |
 | `s` | Toggle favorite for the current track |
 | `p` / `Esc` | Toggle the played-songs panel |
+| `/` | Open Spotify search |
 | `q` / `Ctrl-C` | Quit |
 
 Seeking (arrow keys or progress-bar drag) is available for local files and
@@ -102,3 +103,20 @@ hidden by default and opens over the minimal UI.
 | `p` / `Esc` | Close the panel |
 
 Sort fields: time played, last played, platform, title, times played.
+
+## Spotify search
+
+`/` opens a Spotify catalog search from the playback screen or the history
+browser (requires the one-time `looper spotify login`). Type a query and press
+`Enter`; results are grouped into SONGS, ALBUMS, and PLAYLISTS.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Move selection down / up |
+| `gg` / `G` | Jump to first / last result |
+| `/` | Edit the query again |
+| `Enter` | Play the selection (song loops; album/playlist plays through) |
+| `Esc` | Close search |
+
+While the search overlay is open it captures all keys — `q` types a letter
+instead of quitting (`Ctrl-C` still works).
