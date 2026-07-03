@@ -113,15 +113,113 @@ fn browse_history_session(
         pending_delete: false,
     };
     refresh_history_panel(&mut panel, &storage)?;
+    let mut search: Option<SearchPanelState> = None;
 
     loop {
         startup.frame_count += 1;
         title_state.set("looper — playlist history".to_string())?;
-        terminal.draw(|frame| draw_history_browser(frame, &panel, sync_warning.as_ref()))?;
+        terminal.draw(|frame| {
+            draw_history_browser(frame, &panel, sync_warning.as_ref());
+            if let Some(search_panel) = &search {
+                draw_search_overlay(frame, search_panel);
+            }
+        })?;
 
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
+                // While the search overlay is open it captures every key;
+                // nothing reaches history navigation (hence the `continue`).
+                if search.is_some() {
+                    let cmd = handle_search_key_event(key, search.as_ref().expect("checked"));
+                    match cmd {
+                        KeyCommand::Quit => {
+                            push_replica_best_effort(&storage);
+                            return Ok(());
+                        }
+                        KeyCommand::SearchClose => search = None,
+                        KeyCommand::SearchChar(c) => {
+                            search.as_mut().expect("checked").input.push(c);
+                        }
+                        KeyCommand::SearchBackspace => {
+                            search.as_mut().expect("checked").input.pop();
+                        }
+                        KeyCommand::SearchSubmit => {
+                            let search_panel = search.as_mut().expect("checked");
+                            if !search_panel.input.trim().is_empty() {
+                                search_panel.status = SearchStatus::Searching;
+                                terminal.draw(|frame| {
+                                    draw_history_browser(frame, &panel, sync_warning.as_ref());
+                                    draw_search_overlay(frame, search_panel);
+                                })?;
+                                execute_search(search_panel);
+                            }
+                        }
+                        KeyCommand::SearchNext => {
+                            let search_panel = search.as_mut().expect("checked");
+                            search_panel.selected =
+                                next_item(&search_panel.entries, search_panel.selected);
+                            search_panel.pending_g = false;
+                        }
+                        KeyCommand::SearchPrev => {
+                            let search_panel = search.as_mut().expect("checked");
+                            search_panel.selected =
+                                prev_item(&search_panel.entries, search_panel.selected);
+                            search_panel.pending_g = false;
+                        }
+                        KeyCommand::SearchG => {
+                            let search_panel = search.as_mut().expect("checked");
+                            if search_panel.pending_g {
+                                if let Some(first) = first_item(&search_panel.entries) {
+                                    search_panel.selected = first;
+                                }
+                                search_panel.pending_g = false;
+                            } else {
+                                search_panel.pending_g = true;
+                            }
+                        }
+                        KeyCommand::SearchBottom => {
+                            let search_panel = search.as_mut().expect("checked");
+                            if let Some(last) = last_item(&search_panel.entries) {
+                                search_panel.selected = last;
+                            }
+                            search_panel.pending_g = false;
+                        }
+                        KeyCommand::SearchOpen => {
+                            let search_panel = search.as_mut().expect("checked");
+                            search_panel.focus = SearchFocus::Query;
+                            search_panel.pending_g = false;
+                        }
+                        KeyCommand::SearchPlay => {
+                            let target = {
+                                let search_panel = search.as_ref().expect("checked");
+                                match search_panel.entries.get(search_panel.selected) {
+                                    Some(SearchEntry::Item(item)) => Some(item.uri.clone()),
+                                    _ => None,
+                                }
+                            };
+                            if let Some(target) = target {
+                                search = None;
+                                match play_file_session(
+                                    terminal, title_state, &target, ctx, picker,
+                                )? {
+                                    SessionOutcome::Quit => {
+                                        push_replica_best_effort(&storage);
+                                        return Ok(());
+                                    }
+                                    SessionOutcome::BackToHistory => {
+                                        refresh_history_panel(&mut panel, &storage)?;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 match handle_history_browser_key_event(key, &panel) {
+                    KeyCommand::SearchOpen => {
+                        search = Some(SearchPanelState::new());
+                    }
                     KeyCommand::Quit => {
                         push_replica_best_effort(&storage);
                         return Ok(());
@@ -196,7 +294,6 @@ fn browse_history_session(
                     | KeyCommand::ToggleFullscreen
                     | KeyCommand::ToggleFavorite
                     | KeyCommand::ToggleHistory
-                    | KeyCommand::SearchOpen
                     | KeyCommand::SearchChar(_)
                     | KeyCommand::SearchBackspace
                     | KeyCommand::SearchSubmit
@@ -1063,6 +1160,7 @@ fn handle_history_browser_key_event(key: KeyEvent, panel: &HistoryPanelState) ->
         (KeyCode::Char('r'), _) => KeyCommand::HistoryReverse,
         (KeyCode::Char('s'), _) if !panel.rows.is_empty() => KeyCommand::HistoryToggleFavorite,
         (KeyCode::Char('d'), _) if !panel.rows.is_empty() => KeyCommand::HistoryDelete,
+        (KeyCode::Char('/'), _) => KeyCommand::SearchOpen,
         (KeyCode::Enter, _) if !panel.rows.is_empty() => KeyCommand::HistoryReplay,
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyCommand::Quit,
         _ => KeyCommand::None,
@@ -2027,6 +2125,24 @@ mod tests {
                 &state
             ),
             KeyCommand::Quit,
+        );
+    }
+
+    #[test]
+    fn slash_opens_search_from_history_browser() {
+        let panel = HistoryPanelState {
+            rows: Vec::new(),
+            selected: 0,
+            sort_field: HistorySortField::TimePlayed,
+            descending: true,
+            pending_delete: false,
+        };
+        assert_eq!(
+            handle_history_browser_key_event(
+                KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+                &panel
+            ),
+            KeyCommand::SearchOpen,
         );
     }
 
