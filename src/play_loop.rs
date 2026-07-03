@@ -30,9 +30,11 @@ use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, hypem, ytdlp, TrackInfo};
 use crate::storage::{track_record, HistorySortField, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
-    draw, draw_history_browser, draw_replay_error, draw_startup, restore_terminal, setup_terminal,
-    AppState, HistoryPanelState, ProgressTrack, StartupProgressState, StartupScreenState,
-    HEADER_ART_ROWS, N_BANDS,
+    draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_startup,
+    first_item, flatten_results, last_item, next_item, prev_item, restore_terminal,
+    setup_terminal, AppState, HistoryPanelState, ProgressTrack, SearchEntry, SearchFocus,
+    SearchPanelState, SearchStatus, StartupProgressState, StartupScreenState, HEADER_ART_ROWS,
+    N_BANDS,
 };
 
 const SEEK_STEP: Duration = Duration::from_secs(5);
@@ -193,7 +195,17 @@ fn browse_history_session(
                     | KeyCommand::SeekBackward
                     | KeyCommand::ToggleFullscreen
                     | KeyCommand::ToggleFavorite
-                    | KeyCommand::ToggleHistory => {}
+                    | KeyCommand::ToggleHistory
+                    | KeyCommand::SearchOpen
+                    | KeyCommand::SearchChar(_)
+                    | KeyCommand::SearchBackspace
+                    | KeyCommand::SearchSubmit
+                    | KeyCommand::SearchNext
+                    | KeyCommand::SearchPrev
+                    | KeyCommand::SearchG
+                    | KeyCommand::SearchBottom
+                    | KeyCommand::SearchClose
+                    | KeyCommand::SearchPlay => {}
                 }
             }
         }
@@ -526,6 +538,21 @@ fn run_loop(
             }
         }
 
+        // A submitted search: draw the "searching…" frame, then block on the
+        // Web API call (~300ms; audio is unaffected — rodio owns its thread).
+        if state
+            .search_panel
+            .as_ref()
+            .is_some_and(|p| matches!(p.status, SearchStatus::Searching))
+        {
+            state.frame_count += 1;
+            terminal.draw(|f| draw(f, state))?;
+            if let Some(panel) = state.search_panel.as_mut() {
+                execute_search(panel);
+            }
+            needs_render = true;
+        }
+
         if !state.paused {
             if state.is_playlist {
                 if player.sink.empty() {
@@ -730,6 +757,96 @@ fn dispatch_command(
             }
             Ok(None)
         }
+        KeyCommand::SearchOpen => {
+            match state.search_panel.as_mut() {
+                // `/` while in results focus: back to editing the query.
+                Some(panel) => {
+                    panel.focus = SearchFocus::Query;
+                    panel.pending_g = false;
+                }
+                None => state.search_panel = Some(SearchPanelState::new()),
+            }
+            *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::SearchClose => {
+            state.search_panel = None;
+            *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::SearchChar(c) => {
+            if let Some(panel) = state.search_panel.as_mut() {
+                panel.input.push(c);
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::SearchBackspace => {
+            if let Some(panel) = state.search_panel.as_mut() {
+                panel.input.pop();
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::SearchSubmit => {
+            if let Some(panel) = state.search_panel.as_mut() {
+                if !panel.input.trim().is_empty() {
+                    // Render the "searching…" frame first; run_loop executes
+                    // the blocking search on its next iteration.
+                    panel.status = SearchStatus::Searching;
+                    *needs_render = true;
+                }
+            }
+            Ok(None)
+        }
+        KeyCommand::SearchNext => {
+            if let Some(panel) = state.search_panel.as_mut() {
+                panel.selected = next_item(&panel.entries, panel.selected);
+                panel.pending_g = false;
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::SearchPrev => {
+            if let Some(panel) = state.search_panel.as_mut() {
+                panel.selected = prev_item(&panel.entries, panel.selected);
+                panel.pending_g = false;
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::SearchG => {
+            if let Some(panel) = state.search_panel.as_mut() {
+                if panel.pending_g {
+                    if let Some(first) = first_item(&panel.entries) {
+                        panel.selected = first;
+                    }
+                    panel.pending_g = false;
+                    *needs_render = true;
+                } else {
+                    panel.pending_g = true;
+                }
+            }
+            Ok(None)
+        }
+        KeyCommand::SearchBottom => {
+            if let Some(panel) = state.search_panel.as_mut() {
+                if let Some(last) = last_item(&panel.entries) {
+                    panel.selected = last;
+                }
+                panel.pending_g = false;
+                *needs_render = true;
+            }
+            Ok(None)
+        }
+        KeyCommand::SearchPlay => {
+            if let Some(panel) = &state.search_panel {
+                if let Some(SearchEntry::Item(item)) = panel.entries.get(panel.selected) {
+                    return Ok(Some(LoopAction::ReplayTarget(item.uri.clone())));
+                }
+            }
+            Ok(None)
+        }
         KeyCommand::None => Ok(None),
     }
 }
@@ -870,9 +987,22 @@ pub(crate) enum KeyCommand {
     HistoryDelete,
     HistoryDeleteConfirm,
     HistoryDeleteCancel,
+    SearchOpen,
+    SearchChar(char),
+    SearchBackspace,
+    SearchSubmit,
+    SearchNext,
+    SearchPrev,
+    SearchG,
+    SearchBottom,
+    SearchClose,
+    SearchPlay,
 }
 
 fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
+    if let Some(panel) = &state.search_panel {
+        return handle_search_key_event(key, panel);
+    }
     if let Some(panel) = &state.history_panel {
         if panel.pending_delete {
             return match key.code {
@@ -889,6 +1019,7 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
             (KeyCode::Char('r'), _) => KeyCommand::HistoryReverse,
             (KeyCode::Char('s'), _) => KeyCommand::HistoryToggleFavorite,
             (KeyCode::Char('d'), _) if !panel.rows.is_empty() => KeyCommand::HistoryDelete,
+            (KeyCode::Char('/'), _) => KeyCommand::SearchOpen,
             (KeyCode::Enter, _) => KeyCommand::HistoryReplay,
             (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 KeyCommand::Quit
@@ -907,6 +1038,7 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
             (KeyCode::Left, _) => KeyCommand::SeekBackward,
             (KeyCode::Char('f'), _) => KeyCommand::ToggleFullscreen,
             (KeyCode::Char('s'), _) => KeyCommand::ToggleFavorite,
+            (KeyCode::Char('/'), _) => KeyCommand::SearchOpen,
             (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
                 KeyCommand::ToggleHistory
             }
@@ -935,6 +1067,61 @@ fn handle_history_browser_key_event(key: KeyEvent, panel: &HistoryPanelState) ->
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyCommand::Quit,
         _ => KeyCommand::None,
     }
+}
+
+/// Key routing while the search overlay is open. The overlay captures all
+/// keys (so `q` can be typed and `j` never leaks to history navigation);
+/// only Ctrl-C still quits.
+pub(crate) fn handle_search_key_event(key: KeyEvent, panel: &SearchPanelState) -> KeyCommand {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return KeyCommand::Quit;
+    }
+    match panel.focus {
+        SearchFocus::Query => match key.code {
+            KeyCode::Enter => KeyCommand::SearchSubmit,
+            KeyCode::Esc => KeyCommand::SearchClose,
+            KeyCode::Backspace => KeyCommand::SearchBackspace,
+            KeyCode::Char(c) => KeyCommand::SearchChar(c),
+            _ => KeyCommand::None,
+        },
+        SearchFocus::Results => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => KeyCommand::SearchNext,
+            KeyCode::Char('k') | KeyCode::Up => KeyCommand::SearchPrev,
+            KeyCode::Char('g') => KeyCommand::SearchG,
+            KeyCode::Char('G') => KeyCommand::SearchBottom,
+            KeyCode::Char('/') => KeyCommand::SearchOpen,
+            KeyCode::Enter => KeyCommand::SearchPlay,
+            KeyCode::Esc => KeyCommand::SearchClose,
+            _ => KeyCommand::None,
+        },
+    }
+}
+
+/// Run the blocking search and load results into the panel. Called after the
+/// "searching…" frame has been drawn.
+pub(crate) fn execute_search(panel: &mut SearchPanelState) {
+    match crate::spotify::search(&panel.input) {
+        Ok(results) => {
+            panel.entries = flatten_results(results);
+            match first_item(&panel.entries) {
+                Some(first) => {
+                    panel.selected = first;
+                    panel.focus = SearchFocus::Results;
+                    panel.status = SearchStatus::Idle;
+                }
+                None => {
+                    panel.status =
+                        SearchStatus::Error(format!("no results for \"{}\"", panel.input));
+                    panel.focus = SearchFocus::Query;
+                }
+            }
+        }
+        Err(error) => {
+            panel.status = SearchStatus::Error(error.to_string());
+            panel.focus = SearchFocus::Query;
+        }
+    }
+    panel.pending_g = false;
 }
 
 fn toggle_history_panel(state: &mut AppState, storage: &SharedStorage) -> Result<()> {
@@ -1770,6 +1957,77 @@ mod tests {
             progress_track: None,
             scrub_preview: None,
         }
+    }
+
+    fn state_with_search() -> AppState {
+        let mut state = base_state();
+        state.search_panel = Some(SearchPanelState::new());
+        state
+    }
+
+    #[test]
+    fn slash_opens_search_from_playback() {
+        let state = base_state();
+        let cmd = handle_key_event(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &state,
+        );
+        assert_eq!(cmd, KeyCommand::SearchOpen);
+    }
+
+    #[test]
+    fn search_query_focus_captures_text() {
+        let state = state_with_search();
+        // 'q' must be text input, not Quit
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &state),
+            KeyCommand::SearchChar('q'),
+        );
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &state),
+            KeyCommand::SearchBackspace,
+        );
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &state),
+            KeyCommand::SearchSubmit,
+        );
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &state),
+            KeyCommand::SearchClose,
+        );
+    }
+
+    #[test]
+    fn search_results_focus_uses_vim_keys() {
+        let mut state = state_with_search();
+        state.search_panel.as_mut().unwrap().focus = SearchFocus::Results;
+        for (code, expected) in [
+            (KeyCode::Char('j'), KeyCommand::SearchNext),
+            (KeyCode::Char('k'), KeyCommand::SearchPrev),
+            (KeyCode::Char('g'), KeyCommand::SearchG),
+            (KeyCode::Char('G'), KeyCommand::SearchBottom),
+            (KeyCode::Char('/'), KeyCommand::SearchOpen),
+            (KeyCode::Enter, KeyCommand::SearchPlay),
+            (KeyCode::Esc, KeyCommand::SearchClose),
+        ] {
+            assert_eq!(
+                handle_key_event(KeyEvent::new(code, KeyModifiers::NONE), &state),
+                expected,
+                "key {code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_still_quits_inside_search() {
+        let state = state_with_search();
+        assert_eq!(
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &state
+            ),
+            KeyCommand::Quit,
+        );
     }
 
     #[test]
