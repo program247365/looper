@@ -147,3 +147,24 @@
 - Track artwork in Now Playing — yt-dlp metadata has thumbnail URLs we could pass to `MediaMetadata.cover_url`.
 - Live progress updates in the widget (currently set on track-change and pause/resume only). Could push `set_playback` once per second from the TUI tick.
 - Graceful NSApp shutdown if we ever care about Drop-running for `MediaControls` (currently sidestepped via `process::exit`).
+
+## 2026-07-05: In-TUI Spotify search (`/`) — searched, navigated, and looped from the terminal
+
+### What changed
+- `/` opens a Spotify catalog search overlay from the playback screen and the history browser (`src/spotify/search.rs`, overlay rendering in `src/tui.rs`, key routing in `src/play_loop.rs`).
+- Submit-to-search model: type query, Enter runs one blocking Web API call (~300ms, "searching…" frame first); results grouped SONGS/ALBUMS/PLAYLISTS.
+- Vim navigation: `j`/`k` (skips section headers), `gg`/`G`, `/` re-edits the query, Enter plays the selection, Esc closes. The overlay captures all keys while open (only Ctrl-C quits).
+- Selection rides the existing replay rail (`LoopAction::ReplayTarget` / `play_file_session`), so resolve, track-vs-playlist looping, history recording, and album art needed zero new code.
+- Search auth: user-supplied Spotify API app via `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` (client-credentials flow, token cached in-process ~1h). Missing vars → overlay shows setup steps. Docs in README + docs/spotify.md "Search (optional)".
+
+### What we decided and why
+- Spec'd a zero-setup path (mint Web API tokens from the librespot session) — it died in live testing: Mercury keymaster 403 (retired), login5 tokens get 429 on every api.spotify.com endpoint (with or without client-token attestation), Mercury searchview 404. Spotify has effectively blocked its public Web API for librespot's shared client id — same wall spotify-player hit. Amended the spec in place.
+- Client-credentials over PKCE: no browser flow, no redirect-URI registration, search needs no user context. Search is now independent of the Premium login (playback still needs it).
+- Chose submit-to-search over live search-as-you-type (worker thread + stale-result handling not worth it for v1) and sectioned list over tabs (tabs can layer on later).
+- librespot 0.8 gotcha: `TokenProvider::get_token` takes a comma-separated `&str`, not a slice (docs.rs rendering misleads).
+
+### What to revisit
+- Live search-as-you-type and/or category tabs if the sectioned list feels cramped.
+- Search-first launch mode (`looper search` or `/` from a bare `looper` before the history browser had anything to play).
+- reqwest `429`/Retry-After handling in search (currently surfaces as an error in the overlay; fine for personal API apps with generous quotas).
+- Machine note: this Mac had no Rust toolchain; installed rustup (stable 1.96.1). `cargo` lives in `~/.cargo/bin` — new shells should pick it up via the rustup env hooks.
