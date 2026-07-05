@@ -107,8 +107,11 @@ Sort fields: time played, last played, platform, title, times played.
 ## Spotify search
 
 `/` opens a Spotify catalog search from the playback screen or the history
-browser (requires the one-time `looper spotify login`). Type a query and press
-`Enter`; results are grouped into SONGS, ALBUMS, and PLAYLISTS.
+browser. It needs a one-time setup — your own free Spotify API app in
+`SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — see
+[Spotify → Search](spotify.md#search-optional); without it the overlay shows
+the setup steps. Type a query and press `Enter`; results are grouped into
+SONGS, ALBUMS, and PLAYLISTS.
 
 | Key | Action |
 |-----|--------|

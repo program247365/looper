@@ -157,12 +157,17 @@ uses librespot:
   - `ensure_track_available()` uses librespot's `AudioItem` availability to fail
     a single unplayable track at resolve time, so `resolve_url_with_startup`
     surfaces the "track unavailable" modal instead of playing silence
-- `src/spotify/search.rs` — catalog search via the public Web API (`/v1/search`),
-  authorized with a bearer token minted from the librespot session
-  (`session.token_provider().get_token(...)` — comma-separated scopes string).
-  Returns `SearchResults { tracks, albums, playlists }` of `SearchItem`s whose
-  `uri` is a valid `resolve()` target. Playlist `items` can contain literal
-  `null`s (post-2024 API changes) — the parser filters them.
+- `src/spotify/search.rs` — catalog search via the public Web API
+  (`/v1/search`). Spotify rejects Web API calls made with librespot-session
+  tokens (429 on every endpoint; Mercury keymaster/searchview are retired), so
+  search requires the user's own API app: `SPOTIFY_CLIENT_ID` /
+  `SPOTIFY_CLIENT_SECRET` env vars feed a client-credentials token, cached
+  in-process until shortly before expiry. Missing vars produce a multi-line
+  setup-instructions error shown in the search overlay. Independent of the
+  Premium login (search works without it; playback doesn't). Returns
+  `SearchResults { tracks, albums, playlists }` of `SearchItem`s whose `uri`
+  is a valid `resolve()` target. Playlist `items` can contain literal `null`s
+  (post-2024 API changes) — the parser filters them.
 - `src/spotify/sink.rs` — the bridge. librespot's `Player` pushes decoded PCM
   into a custom `Sink`; a bounded channel carries it to a rodio `Source`. The
   sink blocks under backpressure (throttling the decoder to real time); the

@@ -46,13 +46,17 @@ looper play --url "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
 Press `f` for fullscreen, `space` to pause, `p` for history, `q` to quit. More
 examples and keybindings in [Usage & Keys](docs/usage.md).
 
+Want in-app Spotify search (`/` to find and loop a song, album, or playlist)?
+That takes a free Spotify API app of your own — one-time setup in
+[Spotify → Search](docs/spotify.md#search-optional).
+
 ## Documentation
 
 | Guide | What's inside |
 |-------|---------------|
 | [Installation](docs/installation.md) | Homebrew, build from source, runtime dependencies |
 | [Usage & Keys](docs/usage.md) | Every source, playlists, controls, the history panel |
-| [Spotify](docs/spotify.md) | Login, playback, and how librespot streaming works |
+| [Spotify](docs/spotify.md) | Login, playback, in-app search setup, and how librespot streaming works |
 | [Now Playing & Media Keys](docs/now-playing.md) | The OS media-session integration |
 | [How Playback Works](docs/playback.md) | The `yt-dlp` model, caching, and quirks |
 | [Cross-Device Sync](docs/sync.md) | Share history across machines via a cloud folder |

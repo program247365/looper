@@ -1,7 +1,17 @@
 # Spotify Search Overlay
 
 **Date:** 2026-07-03
-**Status:** Approved
+**Status:** Approved (amended 2026-07-05)
+
+> **Amendment (2026-07-05):** the "mint a Web API token from the librespot
+> session" plan failed in live testing — Spotify's Mercury keymaster endpoint
+> is retired (403), and login5 tokens get 429 on every `api.spotify.com`
+> endpoint (with or without a `client-token` attestation header); Mercury
+> `searchview` is 404. Search instead uses the client-credentials flow with a
+> user-provided free Spotify API app (`SPOTIFY_CLIENT_ID` /
+> `SPOTIFY_CLIENT_SECRET` env vars), with the token cached in-process for its
+> ~1h lifetime. Missing credentials render setup instructions in the overlay.
+> Search is now independent of the Premium login (needed only for playback).
 
 ## Summary
 

@@ -1,13 +1,18 @@
 //! Spotify catalog search via the public Web API.
 //!
 //! Playback and metadata go through librespot's own protocols, but librespot
-//! exposes no search. The Web API's `/v1/search` does, and the librespot
-//! session can mint a bearer token for it — so search needs no second login
-//! and no developer app.
+//! exposes no search, and Spotify rejects Web API calls made with tokens from
+//! librespot's shared client id (every endpoint answers 429; the Mercury
+//! keymaster and searchview routes are retired outright). Search therefore
+//! needs the user's own — free — Spotify API app: `SPOTIFY_CLIENT_ID` and
+//! `SPOTIFY_CLIENT_SECRET` feed a client-credentials token (no browser flow,
+//! no user context), cached in-process for its ~1h lifetime.
+
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{eyre, Result, WrapErr};
 use serde::Deserialize;
-use stream_download::http::reqwest::Client as HttpClient;
 
 /// Display limits per section (spec: 8 tracks, 5 albums, 5 playlists).
 const TRACK_LIMIT: usize = 8;
@@ -32,32 +37,96 @@ pub struct SearchItem {
     pub uri: String,
 }
 
-/// Search Spotify's catalog. Blocking: runs one Web API request on the shared
-/// Spotify runtime (~300ms). Requires a prior `looper spotify login`.
+/// Shown in the search overlay when the API app env vars are missing.
+const SETUP_HELP: &str = "Spotify search needs your own (free) Spotify API app:\n  1. create an app at developer.spotify.com/dashboard\n  2. export SPOTIFY_CLIENT_ID=... and SPOTIFY_CLIENT_SECRET=...\n  3. restart looper\nPlayback is unaffected — see the README's \"Spotify search\" section.";
+
+/// Search Spotify's catalog. Blocking (~300ms), called from the TUI thread
+/// after a "searching…" frame has been drawn. Requires `SPOTIFY_CLIENT_ID` /
+/// `SPOTIFY_CLIENT_SECRET`; does NOT require the librespot Premium login.
 pub fn search(query: &str) -> Result<SearchResults> {
-    let ctx = super::ctx()?;
-    let session = super::session()?;
-    let body = ctx.runtime.block_on(async move {
-        let token = session
-            .token_provider()
-            .get_token("user-read-private,playlist-read-private")
-            .await
-            .map_err(|e| eyre!("failed to get Spotify API token: {e}"))?;
-        let response = HttpClient::new()
-            .get("https://api.spotify.com/v1/search")
-            .bearer_auth(&token.access_token)
-            .query(&[("q", query), ("type", "track,album,playlist"), ("limit", "8")])
-            .send()
-            .await
-            .map_err(|e| eyre!("Spotify search request failed: {e}"))?
-            .error_for_status()
-            .map_err(|e| eyre!("Spotify search failed: {e}"))?;
-        response
-            .text()
-            .await
-            .map_err(|e| eyre!("failed to read Spotify search response: {e}"))
-    })?;
+    let token = search_token()?;
+    let response = reqwest::blocking::Client::new()
+        .get("https://api.spotify.com/v1/search")
+        .bearer_auth(&token)
+        .query(&[("q", query), ("type", "track,album,playlist"), ("limit", "8")])
+        .send()
+        .map_err(|e| eyre!("Spotify search request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| eyre!("Spotify search failed: {e}"))?;
+    let body = response
+        .text()
+        .map_err(|e| eyre!("failed to read Spotify search response: {e}"))?;
     parse_search_response(&body)
+}
+
+struct CachedToken {
+    access_token: String,
+    expires_at: Instant,
+}
+
+static TOKEN: Mutex<Option<CachedToken>> = Mutex::new(None);
+
+/// A valid client-credentials bearer token, fetched with the user's API app
+/// and reused until shortly before expiry (~1h).
+fn search_token() -> Result<String> {
+    let mut slot = TOKEN.lock().unwrap();
+    if let Some(cached) = slot.as_ref() {
+        if Instant::now() < cached.expires_at {
+            return Ok(cached.access_token.clone());
+        }
+    }
+
+    let (client_id, client_secret) = search_app_credentials(
+        std::env::var("SPOTIFY_CLIENT_ID").ok(),
+        std::env::var("SPOTIFY_CLIENT_SECRET").ok(),
+    )?;
+
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        access_token: String,
+        expires_in: u64,
+    }
+
+    let body = reqwest::blocking::Client::new()
+        .post("https://accounts.spotify.com/api/token")
+        .basic_auth(&client_id, Some(&client_secret))
+        .form(&[("grant_type", "client_credentials")])
+        .send()
+        .map_err(|e| eyre!("Spotify token request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| {
+            eyre!("Spotify rejected your API app credentials ({e}) — check SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET")
+        })?
+        .text()
+        .map_err(|e| eyre!("failed to read Spotify token response: {e}"))?;
+    let response: TokenResponse =
+        serde_json::from_str(&body).wrap_err("unexpected Spotify token response")?;
+
+    // Refresh a minute early so an in-flight search never carries a token
+    // that expires mid-request.
+    let expires_at =
+        Instant::now() + Duration::from_secs(response.expires_in.saturating_sub(60).max(60));
+    let token = response.access_token.clone();
+    *slot = Some(CachedToken {
+        access_token: response.access_token,
+        expires_at,
+    });
+    Ok(token)
+}
+
+/// Validate the env-var pair, pointing at the setup instructions when absent.
+/// Split out from `search_token` so the guidance path is testable without
+/// touching process-global env state.
+fn search_app_credentials(
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> Result<(String, String)> {
+    match (client_id, client_secret) {
+        (Some(id), Some(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => {
+            Ok((id, secret))
+        }
+        _ => Err(eyre!("{SETUP_HELP}")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -197,7 +266,18 @@ fn parse_search_response(body: &str) -> Result<SearchResults> {
 mod tests {
     use super::*;
 
-    // Live network + login required: cargo test search_smoke -- --ignored
+    #[test]
+    fn missing_credentials_point_at_setup_docs() {
+        let err = search_app_credentials(None, None).unwrap_err();
+        assert!(err.to_string().contains("developer.spotify.com"));
+        assert!(err.to_string().contains("SPOTIFY_CLIENT_ID"));
+        // A set-but-empty variable gets the same guidance.
+        let err = search_app_credentials(Some("id".into()), Some("  ".into())).unwrap_err();
+        assert!(err.to_string().contains("developer.spotify.com"));
+    }
+
+    // Live network + SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET required:
+    // cargo test search_smoke -- --ignored
     #[test]
     #[ignore]
     fn search_smoke() {

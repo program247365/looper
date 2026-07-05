@@ -25,6 +25,35 @@ looper play --url "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
 
 `spotify:` URIs work too. Spotify does **not** require `yt-dlp` or `ffmpeg`.
 
+## Search (optional)
+
+Press `/` during playback or in the history browser to search Spotify's catalog
+and play a song, album, or playlist without leaving the terminal — see
+[Usage & Keys](usage.md) for the keybindings.
+
+Search talks to Spotify's Web API, which requires **your own (free) API app**.
+Spotify blocks Web API calls made with librespot's shared client id, so the
+playback login above is not enough. One-time setup:
+
+1. Open the [Spotify developer dashboard](https://developer.spotify.com/dashboard)
+   and create an app (any name; the redirect URI is not used by looper's
+   search — enter anything valid, e.g. `http://127.0.0.1:8898/login`).
+2. Copy the app's **Client ID** and **Client Secret**.
+3. Export them in your shell profile:
+
+```shell
+export SPOTIFY_CLIENT_ID="your-client-id"
+export SPOTIFY_CLIENT_SECRET="your-client-secret"
+```
+
+looper exchanges them for a catalog-only token (client-credentials flow — no
+browser login, no account data access) and caches it in memory for its ~1 hour
+lifetime. If the variables aren't set, pressing `/` still works: the overlay
+explains this setup instead of searching.
+
+Searching needs only these variables; *playing* a result still needs the
+Premium login above.
+
 ## How Spotify playback works
 
 Spotify is fundamentally different from the `yt-dlp`-backed services. It exposes

@@ -1372,13 +1372,17 @@ pub fn draw_search_overlay(frame: &mut ratatui::Frame, panel: &SearchPanelState)
             return;
         }
         SearchStatus::Error(message) => {
-            frame.render_widget(
-                Paragraph::new(vec![Line::from(Span::styled(
-                    message.clone(),
-                    Style::default().fg(Color::Rgb(230, 130, 130)),
-                ))]),
-                chunks[2],
-            );
+            // Multi-line: the missing-credentials message carries setup steps.
+            let lines: Vec<Line> = message
+                .lines()
+                .map(|line| {
+                    Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::Rgb(230, 130, 130)),
+                    ))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), chunks[2]);
             return;
         }
         SearchStatus::Idle => {}
