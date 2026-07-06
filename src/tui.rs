@@ -85,6 +85,21 @@ pub struct HistoryPanelState {
     pub pending_delete: bool,
 }
 
+impl HistoryPanelState {
+    /// A freshly opened panel sorts by recency so the track that just played
+    /// is at the top — `total_play_seconds` only accumulates when a track
+    /// ends, so a "Time Played" default would bury new plays at the bottom.
+    pub fn fresh() -> Self {
+        HistoryPanelState {
+            rows: Vec::new(),
+            selected: 0,
+            sort_field: HistorySortField::LastPlayed,
+            descending: true,
+            pending_delete: false,
+        }
+    }
+}
+
 /// In-TUI Spotify search overlay. Opened with `/` from the playback screen or
 /// the history browser; closed with Esc.
 pub struct SearchPanelState {
@@ -1744,6 +1759,42 @@ mod tests {
             .collect();
         assert_eq!(headers, vec!["SONGS", "PLAYLISTS"]);
         assert_eq!(entries.len(), 4);
+    }
+
+    #[test]
+    fn fresh_panel_surfaces_just_played_track_first() {
+        use crate::storage::{Storage, TrackRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_and_migrate_at(dir.path().join("history.sqlite3")).unwrap();
+
+        // An older track with hours of accumulated playtime...
+        storage
+            .record_play(&TrackRecord {
+                track_key: "yt:marathon".into(),
+                replay_target: "yt:marathon".into(),
+                title: "Marathon Focus Mix".into(),
+                platform: "YouTube".into(),
+            })
+            .unwrap();
+        storage.record_playback_time("yt:marathon", 70_000).unwrap();
+
+        // ...then a brand-new play with zero accumulated seconds.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        storage
+            .record_play(&TrackRecord {
+                track_key: "spotify:track:thepath".into(),
+                replay_target: "spotify:track:thepath".into(),
+                title: "The Path".into(),
+                platform: "Spotify".into(),
+            })
+            .unwrap();
+
+        let panel = HistoryPanelState::fresh();
+        let rows = storage
+            .list_history(panel.sort_field, panel.descending)
+            .unwrap();
+        assert_eq!(rows[0].title, "The Path");
     }
 
     fn sample_warning() -> SyncWarning {

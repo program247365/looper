@@ -168,3 +168,17 @@
 - Search-first launch mode (`looper search` or `/` from a bare `looper` before the history browser had anything to play).
 - reqwest `429`/Retry-After handling in search (currently surfaces as an error in the overlay; fine for personal API apps with generous quotas).
 - Machine note: this Mac had no Rust toolchain; installed rustup (stable 1.96.1). `cargo` lives in `~/.cargo/bin` — new shells should pick it up via the rustup env hooks.
+
+## 2026-07-05: History panel default sort buried just-played tracks — switched to Last Played
+
+### What changed
+- `HistoryPanelState::fresh()` constructor (`src/tui.rs`) — fresh history panels now default to sorting by Last Played descending instead of Time Played descending. Both construction sites (`browse_history_session`, `toggle_history_panel` in `src/play_loop.rs`) use it.
+- Regression test `fresh_panel_surfaces_just_played_track_first` (`src/tui.rs`) — records an old track with 70k accumulated seconds and a brand-new play, asserts the new play sorts first under the fresh-panel default. Mutation-verified (fails under the old TimePlayed default).
+
+### What we decided and why
+- Bug report was "Spotify search play not tracked in history" — it *was* tracked (verified in `looper.sqlite3`: record lands at playback start). The default Time Played sort buried it: `total_play_seconds` only accumulates when a track ends (`persist_played_time`), so a first-listen track sorts to the very bottom of a descending list and looks missing.
+- Fixed the default sort rather than making play-seconds accumulate live: a "previously played" list should show recency first, and even live accumulation would rank a new track below multi-hour veterans. Sort remains cyclable with the existing keys.
+
+### What to revisit
+- Consider persisting `total_play_seconds` incrementally (e.g. every N seconds) so the Time Played sort is honest mid-session and a crash doesn't lose the session's playtime.
+- Playlists/albums are recorded per-track only; the collection itself never appears in history. If "replay that whole playlist" from history matters, that needs a collection-level record.

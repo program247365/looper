@@ -28,7 +28,7 @@ use crate::download::{DownloadEvent, LoadingPhase};
 use crate::media_controls::MediaSessionHandle;
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, hypem, ytdlp, TrackInfo};
-use crate::storage::{track_record, HistorySortField, SharedStorage, Storage, SyncWarning};
+use crate::storage::{track_record, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
     draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_startup,
     first_item, flatten_results, last_item, next_item, prev_item, restore_terminal,
@@ -105,13 +105,7 @@ fn browse_history_session(
     let (storage, sync_warning) = Storage::open_and_migrate()?;
     let storage = storage.shared();
     startup.sync_warning = sync_warning.clone();
-    let mut panel = HistoryPanelState {
-        rows: Vec::new(),
-        selected: 0,
-        sort_field: HistorySortField::TimePlayed,
-        descending: true,
-        pending_delete: false,
-    };
+    let mut panel = HistoryPanelState::fresh();
     refresh_history_panel(&mut panel, &storage)?;
     let mut search: Option<SearchPanelState> = None;
 
@@ -1228,13 +1222,7 @@ fn toggle_history_panel(state: &mut AppState, storage: &SharedStorage) -> Result
         return Ok(());
     }
 
-    let mut panel = HistoryPanelState {
-        rows: Vec::new(),
-        selected: 0,
-        sort_field: HistorySortField::TimePlayed,
-        descending: true,
-        pending_delete: false,
-    };
+    let mut panel = HistoryPanelState::fresh();
     refresh_history_panel(&mut panel, storage)?;
     state.history_panel = Some(panel);
     Ok(())
@@ -2024,7 +2012,7 @@ fn startup_logs() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::HistoryRow;
+    use crate::storage::{HistoryRow, HistorySortField};
 
     fn base_state() -> AppState {
         AppState {
