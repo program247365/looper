@@ -112,6 +112,9 @@ pub struct SearchPanelState {
     pub status: SearchStatus,
     /// True after a first `g` in results focus, waiting for the second.
     pub pending_g: bool,
+    /// Artist row the user hit Enter on; `execute_search` fetches its
+    /// discography instead of re-running the text query.
+    pub pending_artist: Option<crate::spotify::SearchItem>,
 }
 
 impl SearchPanelState {
@@ -123,6 +126,7 @@ impl SearchPanelState {
             selected: 0,
             status: SearchStatus::Idle,
             pending_g: false,
+            pending_artist: None,
         }
     }
 }
@@ -145,12 +149,29 @@ pub enum SearchEntry {
 }
 
 pub fn flatten_results(results: crate::spotify::SearchResults) -> Vec<SearchEntry> {
-    let mut entries = Vec::new();
-    for (header, items) in [
+    flatten_sections([
         ("SONGS", results.tracks),
+        ("ARTISTS", results.artists),
         ("ALBUMS", results.albums),
         ("PLAYLISTS", results.playlists),
-    ] {
+    ])
+}
+
+/// Artist discography as overlay entries; Enter on an ARTISTS row swaps the
+/// search results for these.
+pub fn flatten_discography(discography: crate::spotify::Discography) -> Vec<SearchEntry> {
+    flatten_sections([
+        ("ALBUMS", discography.albums),
+        ("SINGLES & EPS", discography.singles),
+        ("COMPILATIONS", discography.compilations),
+    ])
+}
+
+fn flatten_sections<const N: usize>(
+    sections: [(&'static str, Vec<crate::spotify::SearchItem>); N],
+) -> Vec<SearchEntry> {
+    let mut entries = Vec::new();
+    for (header, items) in sections {
         if items.is_empty() {
             continue;
         }
@@ -1751,6 +1772,7 @@ mod tests {
     fn flatten_skips_empty_sections() {
         let results = crate::spotify::SearchResults {
             tracks: vec![item("t")],
+            artists: Vec::new(),
             albums: Vec::new(),
             playlists: vec![item("p")],
         };
@@ -1764,6 +1786,44 @@ mod tests {
             .collect();
         assert_eq!(headers, vec!["SONGS", "PLAYLISTS"]);
         assert_eq!(entries.len(), 4);
+    }
+
+    #[test]
+    fn flatten_orders_artists_between_songs_and_albums() {
+        let results = crate::spotify::SearchResults {
+            tracks: vec![item("t")],
+            artists: vec![item("r")],
+            albums: vec![item("a")],
+            playlists: vec![item("p")],
+        };
+        let headers: Vec<&str> = flatten_results(results)
+            .iter()
+            .filter_map(|e| match e {
+                SearchEntry::Header(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["SONGS", "ARTISTS", "ALBUMS", "PLAYLISTS"]);
+    }
+
+    #[test]
+    fn flatten_discography_groups_with_headers() {
+        let discography = crate::spotify::Discography {
+            albums: vec![item("lp1"), item("lp2")],
+            singles: Vec::new(),
+            compilations: vec![item("comp")],
+        };
+        let entries = flatten_discography(discography);
+        let headers: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| match e {
+                SearchEntry::Header(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        // Empty SINGLES & EPS section is skipped entirely.
+        assert_eq!(headers, vec!["ALBUMS", "COMPILATIONS"]);
+        assert_eq!(entries.len(), 5);
     }
 
     #[test]

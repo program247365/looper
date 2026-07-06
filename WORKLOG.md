@@ -203,3 +203,23 @@
 - Manual smoke test pending: play a Spotify album and a YouTube playlist, check the ≡ rows appear and replay.
 - 1-track playlists take the single-track path and record no collection row.
 - Old-version binaries opening a migrated DB are fine (diesel selects by name, inserts get the SQL default); replica last-write-wins across versions unchanged.
+
+## 2026-07-05: Search missed most of an artist's albums — added ARTISTS section + full-discography browse
+- Investigated "The Toxic Avenger" showing 3 of 14 albums: `/v1/search` is relevance-ranked
+  text search (681 album matches for that query), the request asked for 8, and the overlay
+  displayed only 5 (`ALBUM_LIMIT`). Two fetched albums were silently dropped by the display cap.
+- Live-probed the Web API: dev-mode apps now reject `limit` > 10 (400 "Invalid limit",
+  2025 restriction) — documented in CLAUDE.md; search + discography paging pinned to 10.
+- Changes: `ALBUM_LIMIT` 5→8; request `limit` 8→10; `type=artist` added to search; new
+  ARTISTS section (3 max) between SONGS and ALBUMS. Enter on an artist row fetches
+  `/v1/artists/{id}/albums` (paged by 10, capped at 50) and swaps the overlay to a grouped
+  discography (ALBUMS / SINGLES & EPS / COMPILATIONS) via `panel.pending_artist` and the
+  existing "searching…" deferred-execute rail. `/` + Enter re-runs the search to go back.
+- Decided: text search can never guarantee an artist's complete catalog — the artist-albums
+  endpoint is the only authoritative source, so browse-by-artist is a distinct flow, not a
+  bigger search limit. Discography cap bounds TUI-thread blocking (~5 sequential calls max).
+- Verified: TDD (parser/flatten tests RED→GREEN), plus live smoke tests
+  (`search_smoke`, `discography_smoke` — 14 albums returned for the artist).
+- Revisit: mid-list "searching…" hint says the same thing for search and discography;
+  singles tail truncates silently past 50 entries; artist rows have no byline/detail
+  (dev-mode search omits follower counts).

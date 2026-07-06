@@ -13,7 +13,7 @@
 mod search;
 mod sink;
 
-pub use search::{search, SearchItem, SearchResults};
+pub use search::{artist_albums, is_artist_uri, search, Discography, SearchItem, SearchResults};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};

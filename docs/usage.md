@@ -111,15 +111,20 @@ browser. It needs a one-time setup — your own free Spotify API app in
 `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — see
 [Spotify → Search](spotify.md#search-optional); without it the overlay shows
 the setup steps. Type a query and press `Enter`; results are grouped into
-SONGS, ALBUMS, and PLAYLISTS.
+SONGS, ARTISTS, ALBUMS, and PLAYLISTS.
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Move selection down / up |
 | `gg` / `G` | Jump to first / last result |
 | `/` | Edit the query again |
-| `Enter` | Play the selection (song loops; album/playlist plays through) |
+| `Enter` | Play the selection (song loops; album/playlist plays through); on an ARTISTS row, browse the artist's full discography instead |
 | `Esc` | Close search |
+
+Text search is relevance-ranked, so an artist's own releases compete with
+everything else matching the words — `Enter` on the ARTISTS row is how you get
+the complete list of their albums, singles & EPs, and compilations. `/` +
+`Enter` re-runs the search to go back.
 
 While the search overlay is open it captures all keys — `q` types a letter
 instead of quitting (`Ctrl-C` still works).

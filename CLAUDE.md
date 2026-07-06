@@ -165,9 +165,15 @@ uses librespot:
   in-process until shortly before expiry. Missing vars produce a multi-line
   setup-instructions error shown in the search overlay. Independent of the
   Premium login (search works without it; playback doesn't). Returns
-  `SearchResults { tracks, albums, playlists }` of `SearchItem`s whose `uri`
-  is a valid `resolve()` target. Playlist `items` can contain literal `null`s
-  (post-2024 API changes) — the parser filters them.
+  `SearchResults { tracks, artists, albums, playlists }` of `SearchItem`s.
+  Track/album/playlist `uri`s are valid `resolve()` targets; **artist URIs are
+  not playable** — Enter on an ARTISTS row fetches the full discography via
+  `artist_albums()` (`/v1/artists/{id}/albums`, grouped into a `Discography`)
+  and swaps it into the overlay. Playlist `items` can contain literal `null`s
+  (post-2024 API changes) — the parser filters them. Dev-mode API apps reject
+  `limit` > 10 (400 "Invalid limit", 2025 restriction), so search and the
+  discography pager both use `limit=10`; discography paging is capped at 50
+  entries to bound blocking time on the TUI thread.
 - `src/spotify/sink.rs` — the bridge. librespot's `Player` pushes decoded PCM
   into a custom `Sink`; a bounded channel carries it to a rodio `Source`. The
   sink blocks under backpressure (throttling the decoder to real time); the
@@ -224,7 +230,11 @@ There are now two major UI modes:
   `j`/`k` move (headers are skipped), `gg`/`G` jump, `/` re-edits the query,
   Enter plays the selection through the normal replay rail
   (`LoopAction::ReplayTarget` in playback; `play_file_session` in the history
-  browser). While open the overlay captures all keys; only Ctrl-C quits.
+  browser) — except on an ARTISTS row, where Enter swaps the overlay to the
+  artist's discography (ALBUMS / SINGLES & EPS / COMPILATIONS sections) via
+  `panel.pending_artist` and the same "searching…" deferred-execute rail;
+  `/` + Enter re-runs the text search to get back. While open the overlay
+  captures all keys; only Ctrl-C quits.
 
 ### Playlist behavior
 

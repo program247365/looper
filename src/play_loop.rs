@@ -31,7 +31,8 @@ use crate::plugin::{self, hypem, ytdlp, TrackInfo};
 use crate::storage::{collection_record, track_record, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
     draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_startup,
-    first_item, flatten_results, last_item, next_item, prev_item, restore_terminal,
+    first_item, flatten_discography, flatten_results, last_item, next_item, prev_item,
+    restore_terminal,
     setup_terminal, AppState, HistoryPanelState, ProgressTrack, SearchEntry, SearchFocus,
     SearchPanelState, SearchStatus, StartupProgressState, StartupScreenState, HEADER_ART_ROWS,
     N_BANDS,
@@ -184,12 +185,27 @@ fn browse_history_session(
                             search_panel.pending_g = false;
                         }
                         KeyCommand::SearchPlay => {
-                            let target = {
+                            let selected_item = {
                                 let search_panel = search.as_ref().expect("checked");
                                 match search_panel.entries.get(search_panel.selected) {
-                                    Some(SearchEntry::Item(item)) => Some(item.uri.clone()),
+                                    Some(SearchEntry::Item(item)) => Some(item.clone()),
                                     _ => None,
                                 }
+                            };
+                            let target = match selected_item {
+                                Some(item) if crate::spotify::is_artist_uri(&item.uri) => {
+                                    let search_panel = search.as_mut().expect("checked");
+                                    search_panel.pending_artist = Some(item);
+                                    search_panel.status = SearchStatus::Searching;
+                                    terminal.draw(|frame| {
+                                        draw_history_browser(frame, &panel, sync_warning.as_ref());
+                                        draw_search_overlay(frame, search_panel);
+                                    })?;
+                                    execute_search(search_panel);
+                                    None
+                                }
+                                Some(item) => Some(item.uri),
+                                None => None,
                             };
                             if let Some(target) = target {
                                 search = None;
@@ -931,8 +947,16 @@ fn dispatch_command(
             Ok(None)
         }
         KeyCommand::SearchPlay => {
-            if let Some(panel) = &state.search_panel {
+            if let Some(panel) = state.search_panel.as_mut() {
                 if let Some(SearchEntry::Item(item)) = panel.entries.get(panel.selected) {
+                    if crate::spotify::is_artist_uri(&item.uri) {
+                        // Not playable — swap the results for the artist's
+                        // discography via the "searching…" rail in run_loop.
+                        panel.pending_artist = Some(item.clone());
+                        panel.status = SearchStatus::Searching;
+                        *needs_render = true;
+                        return Ok(None);
+                    }
                     return Ok(Some(LoopAction::ReplayTarget(item.uri.clone())));
                 }
             }
@@ -1189,12 +1213,23 @@ pub(crate) fn handle_search_key_event(key: KeyEvent, panel: &SearchPanelState) -
     }
 }
 
-/// Run the blocking search and load results into the panel. Called after the
+/// Run the blocking search — or, when an artist row was entered, the blocking
+/// discography fetch — and load the entries into the panel. Called after the
 /// "searching…" frame has been drawn.
 pub(crate) fn execute_search(panel: &mut SearchPanelState) {
-    match crate::spotify::search(&panel.input) {
-        Ok(results) => {
-            panel.entries = flatten_results(results);
+    let (entries, empty_message) = match panel.pending_artist.take() {
+        Some(artist) => (
+            crate::spotify::artist_albums(&artist.uri).map(flatten_discography),
+            format!("no releases for \"{}\"", artist.title),
+        ),
+        None => (
+            crate::spotify::search(&panel.input).map(flatten_results),
+            format!("no results for \"{}\"", panel.input),
+        ),
+    };
+    match entries {
+        Ok(entries) => {
+            panel.entries = entries;
             match first_item(&panel.entries) {
                 Some(first) => {
                     panel.selected = first;
@@ -1202,8 +1237,7 @@ pub(crate) fn execute_search(panel: &mut SearchPanelState) {
                     panel.status = SearchStatus::Idle;
                 }
                 None => {
-                    panel.status =
-                        SearchStatus::Error(format!("no results for \"{}\"", panel.input));
+                    panel.status = SearchStatus::Error(empty_message);
                     panel.focus = SearchFocus::Query;
                 }
             }

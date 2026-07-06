@@ -31,6 +31,12 @@ Press `/` during playback or in the history browser to search Spotify's catalog
 and play a song, album, or playlist without leaving the terminal — see
 [Usage & Keys](usage.md) for the keybindings.
 
+Results are grouped into SONGS, ARTISTS, ALBUMS, and PLAYLISTS. Text search is
+relevance-ranked and never shows an artist's complete catalog — for that, move
+to an ARTISTS row and press Enter: the overlay swaps to the artist's full
+discography (albums, singles & EPs, compilations), and Enter on any release
+plays it. Press `/` and Enter to re-run the text search and go back.
+
 Search talks to Spotify's Web API, which requires **your own (free) API app**.
 Spotify blocks Web API calls made with librespot's shared client id, so the
 playback login above is not enough. One-time setup:
