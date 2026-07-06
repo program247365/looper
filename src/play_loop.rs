@@ -28,7 +28,7 @@ use crate::download::{DownloadEvent, LoadingPhase};
 use crate::media_controls::MediaSessionHandle;
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, hypem, ytdlp, TrackInfo};
-use crate::storage::{track_record, SharedStorage, Storage, SyncWarning};
+use crate::storage::{collection_record, track_record, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
     draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_startup,
     first_item, flatten_results, last_item, next_item, prev_item, restore_terminal,
@@ -1379,6 +1379,12 @@ fn play_tracks(
     picker: Option<&Picker>,
 ) -> Result<Option<String>> {
     if is_playlist {
+        // The collection itself is history too: record the playlist/album row
+        // at launch, keyed by the URL the user asked for so `enter` replays it.
+        if let Some(url) = source_url {
+            let record = collection_record(url, &tracks);
+            storage.lock().unwrap().record_play(&record)?;
+        }
         loop_playlist(
             terminal,
             source_url,
@@ -1396,6 +1402,7 @@ fn play_tracks(
             1,
             1,
             false,
+            None,
             storage,
             title_state,
             ctx,
@@ -1442,6 +1449,7 @@ fn loop_playlist(
                 idx + 1,
                 total_tracks,
                 true,
+                source_url,
                 storage.clone(),
                 title_state,
                 ctx,
@@ -1497,6 +1505,9 @@ fn play_single_track(
     track_index: usize,
     total_tracks: usize,
     is_playlist: bool,
+    // History key of the playlist/album this track plays inside, so its
+    // listening time also accrues to the collection row.
+    collection_key: Option<&str>,
     storage: SharedStorage,
     title_state: &mut TitleState,
     ctx: &PlaybackContext,
@@ -1604,8 +1615,14 @@ fn play_single_track(
         title_state,
         ctx,
     )?;
-    if let Err(err) = persist_played_time(&storage, &record.track_key, played_seconds(&state)) {
+    let seconds = played_seconds(&state);
+    if let Err(err) = persist_played_time(&storage, &record.track_key, seconds) {
         eprintln!("looper: warning — could not record final play time on quit: {err}");
+    }
+    if let Some(collection_key) = collection_key {
+        if let Err(err) = persist_played_time(&storage, collection_key, seconds) {
+            eprintln!("looper: warning — could not record collection play time: {err}");
+        }
     }
     Ok(result)
 }
@@ -2012,7 +2029,7 @@ fn startup_logs() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{HistoryRow, HistorySortField};
+    use crate::storage::{HistoryRow, HistorySortField, RecordKind};
 
     fn base_state() -> AppState {
         AppState {
@@ -2224,6 +2241,7 @@ mod tests {
                 replay_target: "a".into(),
                 title: "A".into(),
                 platform: "Local".into(),
+                kind: RecordKind::Track,
                 is_favorite: false,
                 play_count: 1,
                 total_play_seconds: 10,
@@ -2283,6 +2301,7 @@ mod tests {
                 replay_target: "a".into(),
                 title: "A".into(),
                 platform: "Local".into(),
+                kind: RecordKind::Track,
                 is_favorite: false,
                 play_count: 1,
                 total_play_seconds: 10,
@@ -2338,6 +2357,7 @@ mod tests {
                 replay_target: "a".into(),
                 title: "A".into(),
                 platform: "Local".into(),
+                kind: RecordKind::Track,
                 is_favorite: false,
                 play_count: 1,
                 total_play_seconds: 10,

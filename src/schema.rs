@@ -10,5 +10,6 @@ diesel::table! {
         first_played_at -> BigInt,
         last_played_at -> BigInt,
         last_played_computer -> Text,
+        kind -> Text,
     }
 }

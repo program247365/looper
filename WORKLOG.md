@@ -182,3 +182,24 @@
 ### What to revisit
 - Consider persisting `total_play_seconds` incrementally (e.g. every N seconds) so the Time Played sort is honest mid-session and a crash doesn't lose the session's playtime.
 - Playlists/albums are recorded per-track only; the collection itself never appears in history. If "replay that whole playlist" from history matters, that needs a collection-level record.
+
+## 2026-07-05: Collection history rows — playlists/albums are replayable from history
+
+### What changed
+- Migration `2026-07-05-000004_add_kind`: `played_tracks.kind TEXT NOT NULL DEFAULT 'track'` (`'track' | 'collection'`), surfaced as `RecordKind` through `TrackRecord`/`HistoryRow`.
+- A playlist/album launch records a collection row (`collection_record` in `storage.rs`, called from `play_tracks`): keyed by the requested URL so `enter` in the history browser re-resolves and replays the whole thing. `play_count` = launches, not loop passes.
+- Played seconds accrue to both the track row and its collection row (`collection_key` threaded through `play_single_track`), so the Time Played sort ranks collections honestly.
+- yt-dlp entries now parse `playlist_title`/`playlist` into `MetadataEntry.collection` and stamp it on `TrackInfo` — YouTube/SoundCloud playlists get real collection names in history, the playback header, and Now Playing. Single-JSON fallback stamps the top-level playlist title.
+- Collection rows render with a `≡ ` prefix and a warm tint in the history table.
+- Tests: kind round-trip, `collection_record` title/URL-fallback, `parse_entry` playlist-title parsing, glyph render test. Migration verified against a copy of the real 19-row DB (all rows backfill as `track`).
+
+### What we decided and why (grill session)
+- Record collection + per-track rows (not collection-only): keeps favorites/replay on individual tracks, no regression.
+- Same table + `kind` column over a separate `played_collections` table: shared favorite/delete/sort/replica code, one small migration.
+- Record at launch, consistent with per-track behavior — the "record at end" variant was rejected as the same class of bug as the sort issue fixed earlier today.
+- Delete on a collection row prunes only that row (no membership stored, no cascade).
+
+### What to revisit
+- Manual smoke test pending: play a Spotify album and a YouTube playlist, check the ≡ rows appear and replay.
+- 1-track playlists take the single-track path and record no collection row.
+- Old-version binaries opening a migrated DB are fine (diesel selects by name, inserts get the SQL default); replica last-write-wins across versions unchanged.

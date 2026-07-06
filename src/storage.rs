@@ -72,6 +72,31 @@ impl HistorySortField {
     }
 }
 
+/// Whether a history row is a single track or a whole playlist/album. Stored
+/// as TEXT in SQLite; anything unrecognized reads back as `Track` so a DB
+/// touched by a newer looper can't break an older one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordKind {
+    Track,
+    Collection,
+}
+
+impl RecordKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Track => "track",
+            Self::Collection => "collection",
+        }
+    }
+
+    fn from_db(value: &str) -> Self {
+        match value {
+            "collection" => Self::Collection,
+            _ => Self::Track,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HistoryRow {
     pub track_key: String,
@@ -84,6 +109,7 @@ pub struct HistoryRow {
     pub first_played_at: i64,
     pub last_played_at: i64,
     pub last_played_computer: String,
+    pub kind: RecordKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,6 +118,7 @@ pub struct TrackRecord {
     pub replay_target: String,
     pub title: String,
     pub platform: String,
+    pub kind: RecordKind,
 }
 
 #[derive(Insertable)]
@@ -107,6 +134,7 @@ struct NewPlayedTrack<'a> {
     first_played_at: i64,
     last_played_at: i64,
     last_played_computer: &'a str,
+    kind: &'a str,
 }
 
 #[derive(Queryable, Selectable)]
@@ -122,6 +150,7 @@ struct PlayedTrackRow {
     first_played_at: i64,
     last_played_at: i64,
     last_played_computer: String,
+    kind: String,
 }
 
 impl From<PlayedTrackRow> for HistoryRow {
@@ -137,6 +166,7 @@ impl From<PlayedTrackRow> for HistoryRow {
             first_played_at: row.first_played_at,
             last_played_at: row.last_played_at,
             last_played_computer: row.last_played_computer,
+            kind: RecordKind::from_db(&row.kind),
         }
     }
 }
@@ -227,6 +257,7 @@ impl Storage {
                     tracks::play_count.eq(existing.play_count + 1),
                     tracks::last_played_at.eq(now),
                     tracks::last_played_computer.eq(&computer),
+                    tracks::kind.eq(record.kind.as_str()),
                 ))
                 .execute(conn)?;
             } else {
@@ -241,6 +272,7 @@ impl Storage {
                     first_played_at: now,
                     last_played_at: now,
                     last_played_computer: &computer,
+                    kind: record.kind.as_str(),
                 };
                 diesel::insert_into(tracks::played_tracks)
                     .values(&row)
@@ -397,6 +429,7 @@ pub fn track_record(track: &TrackInfo) -> Result<TrackRecord> {
                 .service
                 .clone()
                 .unwrap_or_else(|| "Online".to_string()),
+            kind: RecordKind::Track,
         });
     }
 
@@ -408,6 +441,7 @@ pub fn track_record(track: &TrackInfo) -> Result<TrackRecord> {
                 replay_target: canonical,
                 title: track.title.clone(),
                 platform: "Local".to_string(),
+                kind: RecordKind::Track,
             })
         }
         PlaybackInput::HttpStream { url, .. } => Ok(TrackRecord {
@@ -418,6 +452,7 @@ pub fn track_record(track: &TrackInfo) -> Result<TrackRecord> {
                 .service
                 .clone()
                 .unwrap_or_else(|| "Online".to_string()),
+            kind: RecordKind::Track,
         }),
         PlaybackInput::ProcessStdout { .. } => Err(eyre!(
             "cannot derive persistent track identity without a source URL"
@@ -432,7 +467,27 @@ pub fn track_record(track: &TrackInfo) -> Result<TrackRecord> {
                 .service
                 .clone()
                 .unwrap_or_else(|| "Spotify".to_string()),
+            kind: RecordKind::Track,
         }),
+    }
+}
+
+/// History record for a whole playlist/album launch. Keyed by the URL the user
+/// asked for, so replaying the row re-resolves the collection. Title comes from
+/// the collection name the resolver stamped on its tracks; a collection whose
+/// resolver gave no name falls back to the URL itself — still replayable.
+pub fn collection_record(source_url: &str, tracks: &[TrackInfo]) -> TrackRecord {
+    let first = tracks.first();
+    TrackRecord {
+        track_key: source_url.to_string(),
+        replay_target: source_url.to_string(),
+        title: first
+            .and_then(|track| track.collection.clone())
+            .unwrap_or_else(|| source_url.to_string()),
+        platform: first
+            .and_then(|track| track.service.clone())
+            .unwrap_or_else(|| "Online".to_string()),
+        kind: RecordKind::Collection,
     }
 }
 
@@ -630,12 +685,71 @@ mod tests {
             replay_target: "local:/test.mp3".into(),
             title: "Test".into(),
             platform: "Local".into(),
+            kind: RecordKind::Track,
         };
         storage.record_play(&record).unwrap();
         let rows = storage
             .list_history(HistorySortField::LastPlayed, false)
             .unwrap();
         assert!(!rows[0].last_played_computer.is_empty());
+    }
+
+    #[test]
+    fn collection_kind_round_trips() {
+        let (_dir, storage) = test_storage();
+        storage
+            .record_play(&TrackRecord {
+                track_key: "https://open.spotify.com/album/abc".into(),
+                replay_target: "https://open.spotify.com/album/abc".into(),
+                title: "Destiny Original Soundtrack".into(),
+                platform: "Spotify".into(),
+                kind: RecordKind::Collection,
+            })
+            .unwrap();
+        storage
+            .record_play(&TrackRecord {
+                track_key: "spotify:track:xyz".into(),
+                replay_target: "spotify:track:xyz".into(),
+                title: "The Path".into(),
+                platform: "Spotify".into(),
+                kind: RecordKind::Track,
+            })
+            .unwrap();
+
+        let rows = storage
+            .list_history(HistorySortField::Title, false)
+            .unwrap();
+        assert_eq!(rows[0].kind, RecordKind::Collection);
+        assert_eq!(rows[1].kind, RecordKind::Track);
+    }
+
+    #[test]
+    fn collection_record_uses_collection_title_with_url_fallback() {
+        let tracks = vec![TrackInfo {
+            title: "The Path".into(),
+            duration_secs: None,
+            playback: PlaybackInput::Spotify {
+                track_uri: "spotify:track:xyz".into(),
+            },
+            source_url: Some("spotify:track:xyz".into()),
+            pending_download: None,
+            service: Some("Spotify".into()),
+            thumbnail_path: None,
+            is_live: false,
+            collection: Some("Destiny Original Soundtrack".into()),
+            artist: None,
+        }];
+
+        let record = collection_record("https://open.spotify.com/album/abc", &tracks);
+        assert_eq!(record.kind, RecordKind::Collection);
+        assert_eq!(record.track_key, "https://open.spotify.com/album/abc");
+        assert_eq!(record.title, "Destiny Original Soundtrack");
+        assert_eq!(record.platform, "Spotify");
+
+        let mut untitled = tracks;
+        untitled[0].collection = None;
+        let record = collection_record("https://example.com/playlist", &untitled);
+        assert_eq!(record.title, "https://example.com/playlist");
     }
 
     #[test]
@@ -646,6 +760,7 @@ mod tests {
             replay_target: "https://www.youtube.com/watch?v=YmQ7jRgf4f0".into(),
             title: "Claude FM 06-11".into(),
             platform: "YouTube".into(),
+            kind: RecordKind::Track,
         };
         storage.record_play(&record).unwrap();
 
@@ -684,6 +799,7 @@ mod tests {
                 replay_target: "key-x".into(),
                 title: "X".into(),
                 platform: "Local".into(),
+                kind: RecordKind::Track,
             })
             .unwrap();
         drop(storage);
@@ -709,6 +825,7 @@ mod tests {
                 replay_target: "old".into(),
                 title: "Old".into(),
                 platform: "Local".into(),
+                kind: RecordKind::Track,
             })
             .unwrap();
         drop(storage);
@@ -722,6 +839,7 @@ mod tests {
                 replay_target: "new".into(),
                 title: "New".into(),
                 platform: "Local".into(),
+                kind: RecordKind::Track,
             })
             .unwrap();
         drop(storage);
@@ -753,6 +871,7 @@ mod tests {
                 replay_target: "k".into(),
                 title: "T".into(),
                 platform: "Local".into(),
+                kind: RecordKind::Track,
             })
             .unwrap();
         drop(storage);
@@ -775,6 +894,7 @@ mod tests {
             replay_target: "https://example.com/a".into(),
             title: "A".into(),
             platform: "YouTube".into(),
+            kind: RecordKind::Track,
         };
 
         storage.record_play(&record).unwrap();
@@ -796,6 +916,7 @@ mod tests {
             replay_target: "https://example.com/a".into(),
             title: "A".into(),
             platform: "YouTube".into(),
+            kind: RecordKind::Track,
         };
 
         storage.record_play(&record).unwrap();
@@ -815,6 +936,7 @@ mod tests {
             replay_target: "https://example.com/a".into(),
             title: "A".into(),
             platform: "YouTube".into(),
+            kind: RecordKind::Track,
         };
 
         storage.record_play(&record).unwrap();
@@ -831,6 +953,7 @@ mod tests {
             replay_target: "https://example.com/a".into(),
             title: "A".into(),
             platform: "YouTube".into(),
+            kind: RecordKind::Track,
         };
 
         storage.record_play(&record).unwrap();
@@ -852,6 +975,7 @@ mod tests {
                 replay_target: "b".into(),
                 title: "Beta".into(),
                 platform: "YouTube".into(),
+                kind: RecordKind::Track,
             })
             .unwrap();
         storage.record_playback_time("b", 15).unwrap();
@@ -861,6 +985,7 @@ mod tests {
                 replay_target: "a".into(),
                 title: "Alpha".into(),
                 platform: "SoundCloud".into(),
+                kind: RecordKind::Track,
             })
             .unwrap();
         storage.record_playback_time("a", 60).unwrap();

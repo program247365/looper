@@ -1,0 +1,2 @@
+ALTER TABLE played_tracks
+ADD COLUMN kind TEXT NOT NULL DEFAULT 'track';

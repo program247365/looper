@@ -20,7 +20,7 @@ use std::{
 };
 
 use crate::download::{CacheStatus, DownloadProgress};
-use crate::storage::{HistoryRow, HistorySortField, SyncWarning};
+use crate::storage::{HistoryRow, HistorySortField, RecordKind, SyncWarning};
 
 pub const N_BANDS: usize = 32;
 const PROGRESS_KNOB: char = '•';
@@ -1542,9 +1542,14 @@ fn draw_history_table(
                 let marker = if row.is_favorite { "★" } else { " " };
                 let last_played = format_timestamp(row.last_played_at);
                 let total_time = format_total_play_time(row.total_play_seconds);
+                let title_cell = match row.kind {
+                    RecordKind::Collection => Cell::from(format!("≡ {}", row.title))
+                        .style(Style::default().fg(Color::Rgb(255, 205, 140))),
+                    RecordKind::Track => Cell::from(row.title.clone()),
+                };
                 Row::new(vec![
                     Cell::from(marker).style(Style::default().fg(Color::Yellow)),
-                    Cell::from(row.title.clone()),
+                    title_cell,
                     Cell::from(row.platform.clone()).style(dim_style),
                     Cell::from(last_played).style(dim_style),
                     Cell::from(Line::from(total_time).alignment(Alignment::Right)),
@@ -1763,7 +1768,7 @@ mod tests {
 
     #[test]
     fn fresh_panel_surfaces_just_played_track_first() {
-        use crate::storage::{Storage, TrackRecord};
+        use crate::storage::{RecordKind, Storage, TrackRecord};
 
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open_and_migrate_at(dir.path().join("history.sqlite3")).unwrap();
@@ -1775,6 +1780,7 @@ mod tests {
                 replay_target: "yt:marathon".into(),
                 title: "Marathon Focus Mix".into(),
                 platform: "YouTube".into(),
+                kind: RecordKind::Track,
             })
             .unwrap();
         storage.record_playback_time("yt:marathon", 70_000).unwrap();
@@ -1787,6 +1793,7 @@ mod tests {
                 replay_target: "spotify:track:thepath".into(),
                 title: "The Path".into(),
                 platform: "Spotify".into(),
+                kind: RecordKind::Track,
             })
             .unwrap();
 
@@ -1840,6 +1847,44 @@ mod tests {
             .unwrap();
         assert!(buffer_contains(&terminal, "History sync disabled"));
         assert!(buffer_contains(&terminal, "Full Disk Access"));
+    }
+
+    #[test]
+    fn history_browser_marks_collection_rows_with_glyph() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let row = |title: &str, kind: RecordKind| HistoryRow {
+            track_key: title.to_string(),
+            replay_target: title.to_string(),
+            title: title.to_string(),
+            platform: "Spotify".into(),
+            is_favorite: false,
+            play_count: 1,
+            total_play_seconds: 0,
+            first_played_at: 0,
+            last_played_at: 0,
+            last_played_computer: String::new(),
+            kind,
+        };
+        let panel = HistoryPanelState {
+            rows: vec![
+                row("Destiny Original Soundtrack", RecordKind::Collection),
+                row("The Path", RecordKind::Track),
+            ],
+            selected: 0,
+            sort_field: HistorySortField::LastPlayed,
+            descending: true,
+            pending_delete: false,
+        };
+        terminal
+            .draw(|frame| draw_history_browser(frame, &panel, None))
+            .unwrap();
+        assert!(buffer_contains(
+            &terminal,
+            "≡ Destiny Original Soundtrack"
+        ));
+        assert!(buffer_contains(&terminal, "The Path"));
+        assert!(!buffer_contains(&terminal, "≡ The Path"));
     }
 
     #[test]

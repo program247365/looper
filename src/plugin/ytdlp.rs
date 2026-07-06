@@ -19,6 +19,8 @@ pub struct MetadataEntry {
     pub duration_secs: Option<f64>,
     pub webpage_url: String,
     pub live_status: LiveStatus,
+    /// Playlist/album name this entry came from, when yt-dlp provides one.
+    pub collection: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +94,7 @@ pub fn cached_track_from_entry(entry: MetadataEntry, cache_dir: &Path, service: 
         service: Some(service.to_string()),
         thumbnail_path,
         is_live: false,
-        collection: None,
+        collection: entry.collection,
         artist: entry.artist,
     }
 }
@@ -108,7 +110,7 @@ pub fn streaming_track_from_entry(entry: MetadataEntry, service: &str) -> Result
         service: Some(service.to_string()),
         thumbnail_path: None,
         is_live: matches!(entry.live_status, LiveStatus::IsLive),
-        collection: None,
+        collection: entry.collection,
         artist: entry.artist,
     })
 }
@@ -134,7 +136,7 @@ pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
                 service: Some(service),
                 thumbnail_path: None,
                 is_live,
-                collection: None,
+                collection: entry.collection,
                 artist: entry.artist,
             })
         })
@@ -383,10 +385,23 @@ fn extract_entries_fallback(url: &str) -> Result<Vec<MetadataEntry>> {
         serde_json::from_str(stdout.trim()).wrap_err("failed to parse yt-dlp metadata")?;
 
     if let Some(items) = value.get("entries").and_then(|v| v.as_array()) {
+        // Single-JSON playlists carry the playlist title at the top level,
+        // not per entry — stamp it onto entries that don't have their own.
+        let playlist_title = value
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         items
             .iter()
             .cloned()
-            .map(|item| parse_entry(item, url))
+            .map(|item| {
+                let mut entry = parse_entry(item, url)?;
+                if entry.collection.is_none() {
+                    entry.collection = playlist_title.clone();
+                }
+                Ok(entry)
+            })
             .collect()
     } else {
         Ok(vec![parse_entry(value, url)?])
@@ -422,6 +437,10 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
         value.get("is_live").and_then(Value::as_bool),
     );
 
+    let collection = first_str(&value, &["playlist_title", "playlist"])
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
+
     Ok(MetadataEntry {
         id,
         title,
@@ -429,6 +448,7 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
         duration_secs,
         webpage_url,
         live_status,
+        collection,
     })
 }
 
@@ -570,7 +590,39 @@ fn parse_u64(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_progress_line, LiveStatus};
+    use super::{parse_entry, parse_progress_line, LiveStatus};
+
+    #[test]
+    fn parse_entry_reads_playlist_title_as_collection() {
+        let value = serde_json::json!({
+            "id": "abc123",
+            "title": "Some Track",
+            "webpage_url": "https://www.youtube.com/watch?v=abc123",
+            "playlist_title": "Focus Mixes",
+        });
+        let entry = parse_entry(value, "https://example.com").unwrap();
+        assert_eq!(entry.collection.as_deref(), Some("Focus Mixes"));
+    }
+
+    #[test]
+    fn parse_entry_falls_back_to_playlist_field_then_none() {
+        let value = serde_json::json!({
+            "id": "abc123",
+            "title": "Some Track",
+            "webpage_url": "https://www.youtube.com/watch?v=abc123",
+            "playlist": "Uploads from Someone",
+        });
+        let entry = parse_entry(value, "https://example.com").unwrap();
+        assert_eq!(entry.collection.as_deref(), Some("Uploads from Someone"));
+
+        let value = serde_json::json!({
+            "id": "abc123",
+            "title": "Some Track",
+            "webpage_url": "https://www.youtube.com/watch?v=abc123",
+        });
+        let entry = parse_entry(value, "https://example.com").unwrap();
+        assert_eq!(entry.collection, None);
+    }
 
     #[test]
     fn live_status_prefers_string_field() {

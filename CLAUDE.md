@@ -207,7 +207,14 @@ There are now two major UI modes:
   - optional compact cache badge like `CACHE 42%`
 - history browser (`browse_history_session`) — the landing screen when `looper`
   is run with no `--url`; also reachable mid-playback via the `p` overlay. `enter`
-  replays the selected row.
+  replays the selected row. Fresh panels sort by Last Played descending
+  (`HistoryPanelState::fresh()`) so the just-played row is on top. Rows are
+  tracks or collections (`RecordKind` in `storage.rs`): a playlist/album launch
+  records a collection row (keyed by the URL the user asked for, title from the
+  resolver's collection name, URL fallback) in addition to the per-track rows.
+  Collection rows render with a `≡ ` title prefix and replay through the same
+  rail — `enter` re-resolves the whole playlist. Deleting a collection row does
+  not touch its tracks (no membership is stored).
 - "track unavailable" modal (`draw_replay_error`) — non-fatal overlay shown when
   a replay target can't be resolved; `d` prunes the dead row, any other key
   returns to the history browser.
@@ -223,6 +230,13 @@ There are now two major UI modes:
 
 - single local or remote track: `repeat_infinite()`
 - playlist: play each track once, then loop the playlist
+- a playlist launch writes a collection history row (`collection_record`, called
+  in `play_tracks`) with `play_count` = launches (not loop passes); each track's
+  played seconds accrue to both the track row and the collection row
+  (`collection_key` threaded through `play_single_track`). yt-dlp playlists get
+  their collection name from `playlist_title`/`playlist` in the entry JSON;
+  Spotify stamps it during resolve. A 1-track playlist takes the single-track
+  path (`tracks.len() > 1` gate) and records no collection row.
 - `PrefetchWorker` in `play_loop.rs` uses a bounded channel and background thread to cache current/next tracks where applicable. **Spotify tracks are skipped** by the prefetcher (they stream in-process via librespot and have no `source_url` to download), so there is a brief loading screen between Spotify playlist tracks
 - remote playlists are re-resolved each full loop so expiring service URLs are less likely to be reused forever
 
