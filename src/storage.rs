@@ -35,6 +35,7 @@ pub struct SyncWarning {
 pub enum HistorySortField {
     TimePlayed,
     LastPlayed,
+    Favorites,
     Platform,
     Title,
     PlayCount,
@@ -45,6 +46,7 @@ impl HistorySortField {
         match self {
             Self::TimePlayed => "Time Played",
             Self::LastPlayed => "Last Played",
+            Self::Favorites => "Favorites",
             Self::Platform => "Platform",
             Self::Title => "Title",
             Self::PlayCount => "Times Played",
@@ -54,7 +56,8 @@ impl HistorySortField {
     pub fn next(self) -> Self {
         match self {
             Self::TimePlayed => Self::LastPlayed,
-            Self::LastPlayed => Self::Platform,
+            Self::LastPlayed => Self::Favorites,
+            Self::Favorites => Self::Platform,
             Self::Platform => Self::Title,
             Self::Title => Self::PlayCount,
             Self::PlayCount => Self::TimePlayed,
@@ -65,7 +68,8 @@ impl HistorySortField {
         match self {
             Self::TimePlayed => Self::PlayCount,
             Self::LastPlayed => Self::TimePlayed,
-            Self::Platform => Self::LastPlayed,
+            Self::Favorites => Self::LastPlayed,
+            Self::Platform => Self::Favorites,
             Self::Title => Self::Platform,
             Self::PlayCount => Self::Title,
         }
@@ -396,6 +400,11 @@ fn compare_history_rows(
         HistorySortField::LastPlayed => left
             .last_played_at
             .cmp(&right.last_played_at)
+            .then_with(|| left.title.cmp(&right.title)),
+        HistorySortField::Favorites => left
+            .is_favorite
+            .cmp(&right.is_favorite)
+            .then_with(|| left.last_played_at.cmp(&right.last_played_at))
             .then_with(|| left.title.cmp(&right.title)),
         HistorySortField::TimePlayed => left
             .total_play_seconds
@@ -995,5 +1004,61 @@ mod tests {
             .unwrap();
         assert_eq!(rows[0].title, "Alpha");
         assert_eq!(rows[1].title, "Beta");
+    }
+
+    #[test]
+    fn favorites_sort_puts_starred_rows_first() {
+        let (_dir, storage) = test_storage();
+        for key in ["plain", "starred"] {
+            storage
+                .record_play(&TrackRecord {
+                    track_key: key.into(),
+                    replay_target: key.into(),
+                    title: key.into(),
+                    platform: "YouTube".into(),
+                    kind: RecordKind::Track,
+                })
+                .unwrap();
+        }
+        storage.toggle_favorite("starred").unwrap();
+
+        let rows = storage
+            .list_history(HistorySortField::Favorites, true)
+            .unwrap();
+        assert_eq!(rows[0].track_key, "starred");
+        assert_eq!(rows[1].track_key, "plain");
+    }
+
+    #[test]
+    fn favorites_sort_orders_starred_group_by_last_played() {
+        let row = |favorite: bool, last_played_at: i64| HistoryRow {
+            track_key: "k".into(),
+            replay_target: "k".into(),
+            title: "T".into(),
+            platform: "Local".into(),
+            is_favorite: favorite,
+            play_count: 1,
+            total_play_seconds: 0,
+            first_played_at: 0,
+            last_played_at,
+            last_played_computer: String::new(),
+            kind: RecordKind::Track,
+        };
+
+        let older_star = row(true, 100);
+        let newer_star = row(true, 200);
+        let plain = row(false, 300);
+
+        // Ascending comparisons; the panel's default descending reverse floats
+        // favorites (and recency within them) to the top.
+        use std::cmp::Ordering;
+        assert_eq!(
+            compare_history_rows(&older_star, &newer_star, HistorySortField::Favorites),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_history_rows(&plain, &older_star, HistorySortField::Favorites),
+            Ordering::Less
+        );
     }
 }

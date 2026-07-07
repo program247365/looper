@@ -223,3 +223,15 @@
 - Revisit: mid-list "searching…" hint says the same thing for search and discography;
   singles tail truncates silently past 50 entries; artist rows have no byline/detail
   (dev-mode search omits follower counts).
+
+## 2026-07-07: Favorites sort mode in the history browser h/l cycle
+- Added `HistorySortField::Favorites` (label "Favorites") between Last Played and
+  Platform in the h/l cycle, with comparator `is_favorite` → `last_played_at` → `title`.
+- Decided: a plain sort mode, not a pin-favorites overlay — one axis of state, and
+  `r` reverse stays consistent across all modes. Within the starred group, most
+  recently played sorts first (user's pick).
+- Note: `descending` is a whole-list reverse after an ascending sort, so the
+  comparator treats favorite as *greater*; the default descending panel is what
+  floats stars to the top.
+- Verified: two new storage tests (starred-above-unstarred via `list_history`,
+  in-group recency via `compare_history_rows`); full `cargo test` green.
