@@ -235,3 +235,24 @@
   floats stars to the top.
 - Verified: two new storage tests (starred-above-unstarred via `list_history`,
   in-group recency via `compare_history_rows`); full `cargo test` green.
+
+## 2026-07-08: Collection-only playlist history, l-to-loop-this-song, loop-scope metadata, vortex
+- Playlist listening no longer writes per-track history rows — only the collection
+  row (recorded at launch) accumulates plays/seconds. Deliberate acts re-materialize
+  a track row: `s` star (`Storage::ensure_track_row`, play_count 0) or `l`-loop
+  (normal `record_play`, seconds to the track, not the collection).
+- New `l` key on playlist tracks: arms "loop this song" — song finishes, then
+  re-plays solo with `loop_forever` on (`LoopAction::LoopCurrentTrack`, `solo_loop`
+  flag threaded through `play_single_track`). `n`/`b` resume the playlist; second
+  `l` disarms before the song ends; `l` inert while engaged (repeat_infinite can't
+  be un-repeated mid-stream).
+- Header metadata line now always names the loop scope (playlist / will-loop-armed
+  in amber / looping-track-with-resume-hint / plain looping track); fullscreen
+  footer got compact variants.
+- ~1.2s vortex animation on arming: scatter field damps while a spinning ring of
+  the visualizer palette + center ∞ eases in/out (`vortex_cell`, field-warp — the
+  scatter is density-based, there are no particles to pull).
+- Decided: solo loop is a detour, not a conversion — playlist position is kept.
+  `played_seconds` had to learn `solo_loop` or engaged loops would undercount.
+- Verified: cargo test green (81 tests, 5 new: ensure_track_row x2, l keymap x2,
+  header scope strings). Manual smoke still owed on a real Spotify playlist.

@@ -303,6 +303,7 @@ fn browse_history_session(
                     | KeyCommand::SeekBackward
                     | KeyCommand::ToggleFullscreen
                     | KeyCommand::ToggleFavorite
+                    | KeyCommand::ToggleLoopCurrent
                     | KeyCommand::ToggleHistory
                     | KeyCommand::SearchChar(_)
                     | KeyCommand::SearchBackspace
@@ -534,6 +535,9 @@ enum LoopAction {
     Quit,
     NextTrack,
     PreviousTrack,
+    /// The armed track finished: re-play it as a solo loop instead of
+    /// advancing the playlist.
+    LoopCurrentTrack,
     ReplayTarget(String),
 }
 
@@ -661,9 +665,13 @@ fn run_loop(
         }
 
         if !state.paused {
-            if state.is_playlist {
+            if state.is_playlist && !state.solo_loop {
                 if player.sink.empty() {
-                    return Ok(LoopAction::NextTrack);
+                    return Ok(if state.loop_armed {
+                        LoopAction::LoopCurrentTrack
+                    } else {
+                        LoopAction::NextTrack
+                    });
                 }
             } else if player.try_refill_loop()? {
                 state.loop_count += 1;
@@ -754,13 +762,33 @@ fn dispatch_command(
         }
         KeyCommand::ToggleFavorite => {
             if let Ok(record) = track_record(track) {
-                let favorite = storage.lock().unwrap().toggle_favorite(&record.track_key)?;
+                let favorite = {
+                    let storage = storage.lock().unwrap();
+                    // Playlist tracks have no history row of their own;
+                    // starring one materializes it so there's a row to flip.
+                    if state.is_playlist {
+                        storage.ensure_track_row(&record)?;
+                    }
+                    storage.toggle_favorite(&record.track_key)?
+                };
                 state.is_favorite = favorite;
                 if let Some(panel) = state.history_panel.as_mut() {
                     refresh_history_panel(panel, storage)?;
                 }
             }
             *needs_render = true;
+            Ok(None)
+        }
+        KeyCommand::ToggleLoopCurrent => {
+            if state.is_playlist && !state.solo_loop {
+                state.loop_armed = !state.loop_armed;
+                state.loop_anim_start = if state.loop_armed {
+                    Some(state.frame_count)
+                } else {
+                    None
+                };
+                *needs_render = true;
+            }
             Ok(None)
         }
         KeyCommand::ToggleHistory => {
@@ -1091,6 +1119,7 @@ pub(crate) enum KeyCommand {
     SeekBackward,
     ToggleFullscreen,
     ToggleFavorite,
+    ToggleLoopCurrent,
     ToggleHistory,
     HistoryNext,
     HistoryPrev,
@@ -1153,6 +1182,7 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
             (KeyCode::Left, _) => KeyCommand::SeekBackward,
             (KeyCode::Char('f'), _) => KeyCommand::ToggleFullscreen,
             (KeyCode::Char('s'), _) => KeyCommand::ToggleFavorite,
+            (KeyCode::Char('l'), _) => KeyCommand::ToggleLoopCurrent,
             (KeyCode::Char('/'), _) => KeyCommand::SearchOpen,
             (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
                 KeyCommand::ToggleHistory
@@ -1288,7 +1318,7 @@ fn persist_played_time(
 }
 
 fn played_seconds(state: &AppState) -> i64 {
-    if state.is_playlist {
+    if state.is_playlist && !state.solo_loop {
         return state.elapsed().as_secs() as i64;
     }
 
@@ -1436,6 +1466,7 @@ fn play_tracks(
             1,
             1,
             false,
+            false,
             None,
             storage,
             title_state,
@@ -1444,7 +1475,9 @@ fn play_tracks(
             picker,
         )? {
             LoopAction::Quit => Ok(None),
-            LoopAction::NextTrack | LoopAction::PreviousTrack => Ok(None),
+            LoopAction::NextTrack | LoopAction::PreviousTrack | LoopAction::LoopCurrentTrack => {
+                Ok(None)
+            }
             LoopAction::ReplayTarget(target) => Ok(Some(target)),
         }
     }
@@ -1468,6 +1501,7 @@ fn loop_playlist(
         let total_tracks = shared_tracks.lock().unwrap().len();
 
         let mut idx: usize = 0;
+        let mut solo_loop = false;
         while idx < total_tracks {
             prefetch_worker.enqueue(idx, &mut prefetched);
             prefetch_worker.enqueue(idx + 1, &mut prefetched);
@@ -1483,7 +1517,8 @@ fn loop_playlist(
                 idx + 1,
                 total_tracks,
                 true,
-                source_url,
+                solo_loop,
+                if solo_loop { None } else { source_url },
                 storage.clone(),
                 title_state,
                 ctx,
@@ -1491,8 +1526,16 @@ fn loop_playlist(
                 picker,
             )? {
                 LoopAction::Quit => return Ok(None),
-                LoopAction::NextTrack => idx += 1,
-                LoopAction::PreviousTrack => idx = idx.saturating_sub(1),
+                LoopAction::NextTrack => {
+                    idx += 1;
+                    solo_loop = false;
+                }
+                LoopAction::PreviousTrack => {
+                    idx = idx.saturating_sub(1);
+                    solo_loop = false;
+                }
+                // `l` detour: same index, next pass plays it as a solo loop.
+                LoopAction::LoopCurrentTrack => solo_loop = true,
                 LoopAction::ReplayTarget(target) => return Ok(Some(target)),
             }
         }
@@ -1539,8 +1582,12 @@ fn play_single_track(
     track_index: usize,
     total_tracks: usize,
     is_playlist: bool,
+    // A playlist track re-played as a solo loop after `l`: loops forever like
+    // a single track, but `n`/`b` still return to the playlist.
+    solo_loop: bool,
     // History key of the playlist/album this track plays inside, so its
-    // listening time also accrues to the collection row.
+    // listening time accrues to the collection row. None when solo-looping —
+    // deliberately singled-out listening belongs to the track alone.
     collection_key: Option<&str>,
     storage: SharedStorage,
     title_state: &mut TitleState,
@@ -1573,7 +1620,8 @@ fn play_single_track(
         0,
         sync_warning,
     )?;
-    let player = AudioPlayer::new(track.playback.clone(), !is_playlist && !track.is_live)?;
+    let loops_forever = (!is_playlist || solo_loop) && !track.is_live;
+    let player = AudioPlayer::new(track.playback.clone(), loops_forever)?;
     wait_for_player_ready(
         terminal,
         title_state,
@@ -1585,7 +1633,11 @@ fn play_single_track(
         sync_warning,
     )?;
     let record = track_record(&track)?;
-    {
+    // Passive playlist listening records only the collection row (written at
+    // launch); a track earns its own row when played as itself — a plain
+    // single track or an `l`-looped detour.
+    let records_track_row = !is_playlist || solo_loop;
+    if records_track_row {
         let storage = storage.lock().unwrap();
         storage.record_play(&record)?;
     }
@@ -1633,6 +1685,9 @@ fn play_single_track(
         is_live: track.is_live,
         progress_track: None,
         scrub_preview: None,
+        loop_armed: false,
+        solo_loop,
+        loop_anim_start: None,
     };
 
     if let Some(media) = &ctx.media {
@@ -1650,8 +1705,10 @@ fn play_single_track(
         ctx,
     )?;
     let seconds = played_seconds(&state);
-    if let Err(err) = persist_played_time(&storage, &record.track_key, seconds) {
-        eprintln!("looper: warning — could not record final play time on quit: {err}");
+    if records_track_row {
+        if let Err(err) = persist_played_time(&storage, &record.track_key, seconds) {
+            eprintln!("looper: warning — could not record final play time on quit: {err}");
+        }
     }
     if let Some(collection_key) = collection_key {
         if let Err(err) = persist_played_time(&storage, collection_key, seconds) {
@@ -2093,6 +2150,9 @@ mod tests {
             is_live: false,
             progress_track: None,
             scrub_preview: None,
+            loop_armed: false,
+            solo_loop: false,
+            loop_anim_start: None,
         }
     }
 
@@ -2100,6 +2160,25 @@ mod tests {
         let mut state = base_state();
         state.search_panel = Some(SearchPanelState::new());
         state
+    }
+
+    #[test]
+    fn l_toggles_loop_in_playback_mode() {
+        let state = base_state();
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &state),
+            KeyCommand::ToggleLoopCurrent,
+        );
+    }
+
+    #[test]
+    fn l_still_sorts_when_history_panel_is_open() {
+        let mut state = base_state();
+        state.history_panel = Some(HistoryPanelState::fresh());
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &state),
+            KeyCommand::HistorySortNext,
+        );
     }
 
     #[test]

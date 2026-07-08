@@ -289,6 +289,50 @@ impl Storage {
         Ok(())
     }
 
+    /// Inserts the row for `record` if it doesn't exist yet; never touches an
+    /// existing row. Playlist tracks aren't recorded per-track, so deliberate
+    /// single-track actions (starring, l-looping) call this to materialize the
+    /// row they need. A fresh row gets play_count 0 — the track hasn't been
+    /// played as itself yet.
+    pub fn ensure_track_row(&self, record: &TrackRecord) -> Result<()> {
+        use crate::schema::played_tracks::dsl as tracks;
+
+        let now = unix_timestamp();
+        let computer = computer_name();
+        let mut connection = establish_connection(&self.db_path)?;
+        connection.transaction::<_, diesel::result::Error, _>(|conn| {
+            let exists = tracks::played_tracks
+                .filter(tracks::track_key.eq(&record.track_key))
+                .select(tracks::track_key)
+                .first::<String>(conn)
+                .optional()?
+                .is_some();
+
+            if !exists {
+                let row = NewPlayedTrack {
+                    track_key: &record.track_key,
+                    replay_target: &record.replay_target,
+                    title: &record.title,
+                    platform: &record.platform,
+                    is_favorite: false,
+                    play_count: 0,
+                    total_play_seconds: 0,
+                    first_played_at: now,
+                    last_played_at: now,
+                    last_played_computer: &computer,
+                    kind: record.kind.as_str(),
+                };
+                diesel::insert_into(tracks::played_tracks)
+                    .values(&row)
+                    .execute(conn)?;
+            }
+
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
     pub fn record_playback_time(&self, track_key: &str, played_seconds: i64) -> Result<()> {
         use crate::schema::played_tracks::dsl as tracks;
 
@@ -1004,6 +1048,49 @@ mod tests {
             .unwrap();
         assert_eq!(rows[0].title, "Alpha");
         assert_eq!(rows[1].title, "Beta");
+    }
+
+    #[test]
+    fn ensure_track_row_inserts_without_play() {
+        let (_dir, storage) = test_storage();
+        let record = TrackRecord {
+            track_key: "k".into(),
+            replay_target: "k".into(),
+            title: "T".into(),
+            platform: "Spotify".into(),
+            kind: RecordKind::Track,
+        };
+
+        storage.ensure_track_row(&record).unwrap();
+        let rows = storage
+            .list_history(HistorySortField::LastPlayed, true)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].play_count, 0);
+
+        // Starring now has a row to flip.
+        assert!(storage.toggle_favorite("k").unwrap());
+    }
+
+    #[test]
+    fn ensure_track_row_leaves_existing_row_alone() {
+        let (_dir, storage) = test_storage();
+        let record = TrackRecord {
+            track_key: "k".into(),
+            replay_target: "k".into(),
+            title: "T".into(),
+            platform: "Spotify".into(),
+            kind: RecordKind::Track,
+        };
+
+        storage.record_play(&record).unwrap();
+        storage.ensure_track_row(&record).unwrap();
+
+        let rows = storage
+            .list_history(HistorySortField::LastPlayed, true)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].play_count, 1, "ensure must not bump play_count");
     }
 
     #[test]

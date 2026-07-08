@@ -216,8 +216,11 @@ There are now two major UI modes:
   replays the selected row. Fresh panels sort by Last Played descending
   (`HistoryPanelState::fresh()`) so the just-played row is on top. Rows are
   tracks or collections (`RecordKind` in `storage.rs`): a playlist/album launch
-  records a collection row (keyed by the URL the user asked for, title from the
-  resolver's collection name, URL fallback) in addition to the per-track rows.
+  records **only** a collection row (keyed by the URL the user asked for, title
+  from the resolver's collection name, URL fallback) — passive playlist listening
+  writes no per-track rows. A track inside a playlist earns its own row only via
+  a deliberate act: starring it with `s` (`Storage::ensure_track_row`, born with
+  `play_count` 0) or `l`-looping it (normal `record_play`).
   Collection rows render with a `≡ ` title prefix and replay through the same
   rail — `enter` re-resolves the whole playlist. Deleting a collection row does
   not touch its tracks (no membership is stored).
@@ -240,10 +243,26 @@ There are now two major UI modes:
 
 - single local or remote track: `repeat_infinite()`
 - playlist: play each track once, then loop the playlist
+- `l` on a playlist track arms "loop this song" (`KeyCommand::ToggleLoopCurrent`
+  → `AppState.loop_armed`; second `l` disarms, `n`/`b` clear it): when the song
+  ends, `run_loop` returns `LoopAction::LoopCurrentTrack` and `loop_playlist`
+  re-plays the same index with `solo_loop = true` — a fresh `AudioPlayer` with
+  `loop_forever` on (this is what wires librespot's end-of-track re-load, so it
+  works for Spotify and files alike). While solo-looping, `n`/`b` resume the
+  playlist; `l` is inert (rodio's `repeat_infinite` can't be un-repeated).
+  Arming also stamps `loop_anim_start`, which drives a ~1.2s vortex in the
+  scatter visualizer (`vortex_cell` in `tui.rs`: field damps, a spinning ring
+  with a center `∞` eases in and out). The header metadata line always names
+  the loop scope: `∞ loops playlist`, `⟲ will loop this song` (armed, amber),
+  `∞ looping track · [n] resume playlist` (solo), or `∞ looping track` (plain
+  single track).
 - a playlist launch writes a collection history row (`collection_record`, called
-  in `play_tracks`) with `play_count` = launches (not loop passes); each track's
-  played seconds accrue to both the track row and the collection row
-  (`collection_key` threaded through `play_single_track`). yt-dlp playlists get
+  in `play_tracks`) with `play_count` = launches (not loop passes); played
+  seconds accrue **only to the collection row** (`collection_key` threaded
+  through `play_single_track`; per-track rows aren't written for passive
+  playlist listening — see history browser notes above). A solo-looped track is
+  the exception: it records itself like a directly-requested single track, and
+  its seconds go to the track row, not the collection. yt-dlp playlists get
   their collection name from `playlist_title`/`playlist` in the entry JSON;
   Spotify stamps it during resolve. A 1-track playlist takes the single-track
   path (`tracks.len() > 1` gate) and records no collection row.

@@ -63,6 +63,15 @@ pub struct AppState {
     /// scrubbing. The actual `seek_to` is deferred until the mouse is released,
     /// so a drag does one decode instead of dozens. `None` when not scrubbing.
     pub scrub_preview: Option<Duration>,
+    /// `l` was pressed on a playlist track: when this song ends it loops solo
+    /// instead of advancing. Cleared by a second `l` or by skipping tracks.
+    pub loop_armed: bool,
+    /// This session is a playlist track re-played as a solo loop (the engaged
+    /// state of `loop_armed`). `n`/`b` still return to the playlist.
+    pub solo_loop: bool,
+    /// `frame_count` at the moment `l` armed the loop; drives the ~1s vortex
+    /// animation in the visualizer. `None` once the animation has played out.
+    pub loop_anim_start: Option<u64>,
 }
 
 /// Clickable region of the rendered progress bar. The track spans columns
@@ -282,6 +291,12 @@ pub fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     // Cleared each frame; `draw_progress` re-records it only when the bar is
     // actually drawn, so fullscreen mode leaves no stale clickable region.
     state.progress_track = None;
+    // Retire the loop-arm vortex once it has played out.
+    if let Some(start) = state.loop_anim_start {
+        if state.frame_count.saturating_sub(start) > VORTEX_FRAMES {
+            state.loop_anim_start = None;
+        }
+    }
     let body_area = match state.sync_warning.as_ref() {
         Some(warning) => {
             let chunks = Layout::default()
@@ -850,15 +865,32 @@ fn header_lines(state: &AppState) -> Vec<Line<'static>> {
         ("●  PLAYING", Color::Green)
     };
 
-    let secondary_text = if state.is_playlist {
-        match &state.collection {
+    // The metadata line always names the loop scope: what comes back around
+    // when the current thing ends — the playlist, this song, or nothing (live).
+    let secondary_text = if state.solo_loop {
+        format!(
+            "∞ looping track · Loop #{} · [n] resume playlist",
+            state.loop_count
+        )
+    } else if state.is_playlist {
+        let base = match &state.collection {
             Some(name) => format!("{name} · Track {}/{}", state.track_index, state.total_tracks),
             None => format!("Track {}/{}", state.track_index, state.total_tracks),
+        };
+        if state.loop_armed {
+            format!("{base} · ⟲ will loop this song")
+        } else {
+            format!("{base} · ∞ loops playlist")
         }
     } else if state.is_live {
         "LIVE".to_string()
     } else {
-        format!("Loop #{} of ∞", state.loop_count)
+        format!("∞ looping track · Loop #{}", state.loop_count)
+    };
+    let secondary_style = if state.loop_armed {
+        Style::default().fg(Color::Rgb(255, 180, 80))
+    } else {
+        Style::default().fg(Color::DarkGray)
     };
 
     let cache_badge = state.cache_status.as_ref().and_then(|status| {
@@ -893,7 +925,7 @@ fn header_lines(state: &AppState) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::raw("       "),
-            Span::styled(secondary_text, Style::default().fg(Color::DarkGray)),
+            Span::styled(secondary_text, secondary_style),
             if let Some(badge) = cache_badge {
                 Span::styled(
                     format!("  {badge}"),
@@ -960,10 +992,26 @@ fn draw_scatter(
         return;
     }
 
+    // Loop-arm vortex: progress through the animation, if one is running.
+    let vortex = state.loop_anim_start.and_then(|start| {
+        let elapsed = state.frame_count.saturating_sub(start);
+        (elapsed <= VORTEX_FRAMES).then(|| elapsed as f32 / VORTEX_FRAMES as f32)
+    });
+    // While the vortex is up, the music field dims so the ring reads clearly.
+    let field_damp = vortex
+        .map(|t| 1.0 - vortex_strength(t) * 0.85)
+        .unwrap_or(1.0);
+
     let rows: Vec<Line> = (0..h)
         .map(|row| {
             let spans: Vec<Span> = (0..w)
                 .map(|col| {
+                    if let Some(t) = vortex {
+                        if let Some(span) = vortex_cell(row, col, w, h, t) {
+                            return span;
+                        }
+                    }
+
                     let band_idx = (col * n) / w;
                     let amp = state.bands[band_idx];
 
@@ -978,7 +1026,7 @@ fn draw_scatter(
                     // Density is highest at the bottom and falls off quadratically toward the top.
                     let show = if amp > 0.001 && row_ratio <= amp {
                         let t = row_ratio / amp; // 0 at ceiling, 1 at floor
-                        let density = (1.0 - t) * (1.0 - t) * 0.75;
+                        let density = (1.0 - t) * (1.0 - t) * 0.75 * field_damp;
                         cell_noise(row, col, (state.frame_count / 4) as usize) < density
                     } else {
                         false
@@ -996,6 +1044,50 @@ fn draw_scatter(
         .collect();
 
     frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// Frames the `l`-arm vortex runs for (~1.2s at the 30 FPS render cap).
+pub const VORTEX_FRAMES: u64 = 36;
+
+/// Ease the vortex in and back out: 0 → 1 → 0 over the animation.
+fn vortex_strength(t: f32) -> f32 {
+    (std::f32::consts::PI * t).sin()
+}
+
+/// Cell overlay for the loop-arm animation: the scatter field collapses into
+/// a spinning ring of the visualizer's own colors with an ∞ at the center,
+/// then releases back to the music.
+fn vortex_cell(row: usize, col: usize, w: usize, h: usize, t: f32) -> Option<Span<'static>> {
+    let s = vortex_strength(t);
+    let cx = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    // Terminal cells are roughly twice as tall as wide; halving dx keeps the
+    // ring visually circular.
+    let dx = (col as f32 - cx) * 0.5;
+    let dy = row as f32 - cy;
+
+    if s > 0.4 && row == h / 2 && (col as f32 - cx).abs() < 1.0 {
+        return Some(Span::styled(
+            "∞",
+            Style::default()
+                .fg(Color::Rgb(255, 180, 80))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let radius = (h as f32 * 0.38).min(w as f32 * 0.19).max(1.5) * (0.4 + 0.6 * s);
+    let d = (dx * dx + dy * dy).sqrt();
+    if (d - radius).abs() < 0.2 + 0.7 * s {
+        // Color spins around the ring as the animation advances.
+        let angle = dy.atan2(dx) / std::f32::consts::TAU;
+        let spin = (angle + t * 2.0).rem_euclid(1.0);
+        let idx = (spin * 15.0) as usize;
+        return Some(Span::styled(
+            "·",
+            Style::default().fg(scatter_color(idx, 16)),
+        ));
+    }
+    None
 }
 
 /// Per-cell pseudo-random value in [0, 1). Advances slowly with `t` (frame_count / 4)
@@ -1254,12 +1346,24 @@ fn draw_micro_status(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, st
     } else {
         "● PLAYING"
     };
-    let secondary_info = if state.is_playlist {
-        format!("Track {}/{}", state.track_index, state.total_tracks)
+    let secondary_info = if state.solo_loop {
+        format!("∞ Loop #{} · [n] playlist", state.loop_count)
+    } else if state.is_playlist {
+        let base = format!("Track {}/{}", state.track_index, state.total_tracks);
+        if state.loop_armed {
+            format!("{base} · ⟲ will loop")
+        } else {
+            base
+        }
     } else if state.is_live {
         "LIVE".to_string()
     } else {
         format!("Loop #{}", state.loop_count)
+    };
+    let secondary_style = if state.loop_armed {
+        Style::default().fg(Color::Rgb(255, 180, 80))
+    } else {
+        Style::default().fg(Color::DarkGray)
     };
     let cache_info = state.cache_status.as_ref().and_then(|status| {
         if status.complete {
@@ -1283,7 +1387,7 @@ fn draw_micro_status(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, st
         Span::raw("  "),
         Span::styled(time_str, Style::default().fg(Color::Rgb(180, 180, 200))),
         Span::raw("  "),
-        Span::styled(secondary_info, Style::default().fg(Color::DarkGray)),
+        Span::styled(secondary_info, secondary_style),
         Span::raw("  "),
         Span::styled(
             status,
@@ -1735,6 +1839,65 @@ mod tests {
             }
         }
         false
+    }
+
+    fn playback_state() -> AppState {
+        AppState {
+            filename: "song".into(),
+            service: Some("Spotify".into()),
+            is_favorite: false,
+            duration: None,
+            paused: false,
+            loop_count: 4,
+            track_index: 3,
+            total_tracks: 12,
+            is_playlist: false,
+            collection: None,
+            loop_start: Instant::now(),
+            pause_elapsed: Duration::default(),
+            bands: vec![0.0; 4],
+            prev_bands: vec![0.0; 4],
+            band_peak: vec![0.02; 4],
+            fullscreen: false,
+            frame_count: 0,
+            cache_status: None,
+            history_panel: None,
+            search_panel: None,
+            sync_warning: None,
+            thumbnail: None,
+            thumbnail_cols: 0,
+            is_live: false,
+            progress_track: None,
+            scrub_preview: None,
+            loop_armed: false,
+            solo_loop: false,
+            loop_anim_start: None,
+        }
+    }
+
+    fn secondary_line(state: &AppState) -> String {
+        header_lines(state)[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn header_names_loop_scope() {
+        let mut state = playback_state();
+        assert!(secondary_line(&state).contains("∞ looping track · Loop #4"));
+
+        state.is_playlist = true;
+        state.collection = Some("Focus Mix".into());
+        assert!(secondary_line(&state).contains("Focus Mix · Track 3/12 · ∞ loops playlist"));
+
+        state.loop_armed = true;
+        assert!(secondary_line(&state).contains("Focus Mix · Track 3/12 · ⟲ will loop this song"));
+
+        state.loop_armed = false;
+        state.solo_loop = true;
+        assert!(secondary_line(&state).contains("∞ looping track · Loop #4 · [n] resume playlist"));
     }
 
     fn item(title: &str) -> crate::spotify::SearchItem {
