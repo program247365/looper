@@ -819,7 +819,7 @@ fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state
 
     draw_scatter(frame, chunks[1], state, true);
     draw_progress(frame, chunks[2], state);
-    draw_footer(frame, chunks[3]);
+    draw_footer(frame, chunks[3], state);
 
     // Render the stateful image last so its mutable borrow of state.thumbnail
     // doesn't conflict with the immutable borrows above.
@@ -1295,19 +1295,30 @@ fn draw_progress(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
 
 // ── Footer ────────────────────────────────────────────────────────────────────
 
-fn draw_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-    let text = vec![Line::from(vec![
+fn draw_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let mut spans = vec![
         Span::styled("[Space]", Style::default().fg(Color::Rgb(255, 160, 50))),
         Span::raw(" Pause/Resume   "),
         Span::styled("[f]", Style::default().fg(Color::Rgb(255, 160, 50))),
         Span::raw(" Fullscreen   "),
         Span::styled("[s]", Style::default().fg(Color::Rgb(255, 160, 50))),
         Span::raw(" Favorite   "),
+    ];
+    // `l` only means something on a playlist track that isn't already the loop.
+    if state.is_playlist && !state.solo_loop {
+        spans.push(Span::styled(
+            "[l]",
+            Style::default().fg(Color::Rgb(255, 160, 50)),
+        ));
+        spans.push(Span::raw(" Loop   "));
+    }
+    spans.extend([
         Span::styled("[p]", Style::default().fg(Color::Rgb(255, 160, 50))),
         Span::raw(" Played   "),
         Span::styled("[q]", Style::default().fg(Color::Rgb(255, 160, 50))),
         Span::raw(" Quit"),
-    ])];
+    ]);
+    let text = vec![Line::from(spans)];
 
     let block = Block::default()
         .borders(Borders::ALL)
