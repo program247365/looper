@@ -256,3 +256,9 @@
   `played_seconds` had to learn `solo_loop` or engaged loops would undercount.
 - Verified: cargo test green (81 tests, 5 new: ensure_track_row x2, l keymap x2,
   header scope strings). Manual smoke still owed on a real Spotify playlist.
+
+## 2026-07-08: Released v0.13.0 + v0.13.1
+- v0.13.0: Favorites sort, collection-only playlist history, l-to-loop, loop-scope
+  metadata, vortex animation. v0.13.1: [l] Loop added to the footer menu, shown
+  only where the key is live (playlist track, not solo-looping).
+- Both releases: tag → CI arm64 binary → tap formula updated automatically.
