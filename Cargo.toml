@@ -36,6 +36,9 @@ rodio = { version = "0.22", default-features = false, features = ["playback", "m
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 structopt = "0.3.21"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+# Already in the tree transitively via stream-download; the direct dep is only
+# for CancellationToken, used to cancel stream downloads at player teardown.
+tokio-util = "0.7"
 # Spotify playback. `librespot-playback` has default-features off on purpose:
 # it keeps the bundled (older) rodio audio backend out of the tree so there is
 # only one rodio. We feed librespot's decoded PCM through our own custom Sink

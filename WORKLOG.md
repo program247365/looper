@@ -262,3 +262,32 @@
   metadata, vortex animation. v0.13.1: [l] Loop added to the footer menu, shown
   only where the key is live (playlist track, not solo-looping).
 - Both releases: tag → CI arm64 binary → tap formula updated automatically.
+
+## 2026-07-09: Fixed the quit-freeze on stalled live streams (the "deleted the playing row" force-quit)
+- Diagnosed the reported freeze: deleting the currently-playing history row was
+  incidental. Root cause: rodio decodes inside the CoreAudio render callback, and
+  `StreamDownload::read` blocks on a Condvar that only writer progress or
+  "stream done" wakes. When a live stream goes quiet (e.g. the daily Claude FM
+  broadcast ending), stream-download's reconnect loop retries forever without
+  signalling, the callback wedges in `read`, and `AudioPlayer` teardown then
+  hangs in `_device` drop (AudioOutputUnitStop waits on the callback) — right
+  between the two quit warnings, matching the frozen screenshot. Force quit then
+  orphaned yt-dlp/ffmpeg (found still alive, PPID 1).
+- Fix: `AudioPlayer` now keeps the download's `CancellationToken` (HTTP and
+  process inputs) and cancels it in a custom `Drop` before fields drop.
+  stream-download's cancelled path kills the child pipeline and signals stream
+  done, waking any wedged reader. Also fixes child-process cleanup on every
+  teardown. New ignored test `drop_does_not_hang_on_stalled_process_stream`
+  (ffmpeg emits 6s of sine then stalls without EOF) reproduced the hang, passes
+  with the fix.
+- Companion fixes for the delete-current-row scenario: `record_playback_time`
+  treats a missing row as a no-op (respect the delete; kills the "Record not
+  found" warning smeared over the TUI), and `s`/star always `ensure_track_row`
+  first so starring after a mid-play delete materializes instead of crashing.
+- Verified: cargo test green (80 + 2), stalled-stream test passes in ~9s,
+  real-world e2e (live lofi stream, quit during playback) exits in ~2s with zero
+  leftover yt-dlp/ffmpeg. Note: fix is unreleased — needs `make release-patch`
+  to reach the Homebrew-installed binary Kevin actually runs.
+- TUI e2e gotcha for next time: grep the pty log for UI strings fails — ratatui
+  writes cells with escape codes between characters; use the terminal title
+  (emitted as one OSC string) as the playback-state signal instead.

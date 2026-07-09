@@ -17,6 +17,7 @@ use stream_download::storage::memory::MemoryStorageProvider;
 use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
 use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
 
 use crate::playback_input::PlaybackInput;
 use stream_download::http::reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -83,6 +84,11 @@ impl<S: Source> Source for SampleTap<S> {
 pub struct AudioPlayer {
     // Owns the OS audio output; dropping it stops playback, so keep it alive.
     _device: MixerDeviceSink,
+    // Cancels the stream download at teardown (see `Drop` below). Without it a
+    // stalled stream (e.g. a live broadcast that went quiet) leaves the audio
+    // callback blocked inside `StreamDownload::read`, and dropping `_device`
+    // then waits on that callback forever — freezing the whole app on quit.
+    download_cancel: Option<CancellationToken>,
     _download_runtime: Option<Runtime>,
     pub sink: Player,
     pub duration: Option<Duration>,
@@ -123,6 +129,7 @@ impl AudioPlayer {
             });
             return Ok(Self {
                 _device: device,
+                download_cancel: None,
                 _download_runtime: None,
                 sink,
                 duration,
@@ -135,7 +142,7 @@ impl AudioPlayer {
             });
         }
 
-        let (reader, duration, runtime, byte_len) = open_input(&input)?;
+        let (reader, duration, runtime, byte_len, download_cancel) = open_input(&input)?;
         let source = decode_input(reader, byte_len)?;
 
         let sample_rate = source.sample_rate().get();
@@ -164,6 +171,7 @@ impl AudioPlayer {
 
         Ok(Self {
             _device: device,
+            download_cancel,
             _download_runtime: runtime,
             sink,
             duration,
@@ -214,7 +222,7 @@ impl AudioPlayer {
         if !self.refillable || !self.sink.empty() {
             return Ok(false);
         }
-        let (reader, _, _, byte_len) = open_input(&self.input)?;
+        let (reader, _, _, byte_len, _) = open_input(&self.input)?;
         let source = decode_input(reader, byte_len)?;
         let tapped = SampleTap {
             inner: source,
@@ -222,6 +230,19 @@ impl AudioPlayer {
         };
         self.sink.append(tapped);
         Ok(true)
+    }
+}
+
+/// Runs before the fields drop. Cancelling the download makes stream-download
+/// kill the yt-dlp/ffmpeg children and signal "stream done", which wakes any
+/// audio callback blocked inside `StreamDownload::read`. Only then can
+/// `_device`'s drop (which waits for the callback to return) complete. The
+/// runtime processing the cancellation is still alive here — fields drop after.
+impl Drop for AudioPlayer {
+    fn drop(&mut self) {
+        if let Some(token) = &self.download_cancel {
+            token.cancel();
+        }
     }
 }
 
@@ -238,9 +259,15 @@ fn decode_input(
     builder.build().wrap_err("failed to decode audio")
 }
 
-fn open_input(
-    input: &PlaybackInput,
-) -> Result<(Box<dyn MediaReader>, Option<Duration>, Option<Runtime>, Option<u64>)> {
+type OpenedInput = (
+    Box<dyn MediaReader>,
+    Option<Duration>,
+    Option<Runtime>,
+    Option<u64>,
+    Option<CancellationToken>,
+);
+
+fn open_input(input: &PlaybackInput) -> Result<OpenedInput> {
     match input {
         PlaybackInput::File(path) => {
             let path_str = path.to_string_lossy();
@@ -252,7 +279,7 @@ fn open_input(
 
             let file = File::open(path).wrap_err("failed to open audio file")?;
             let byte_len = file.metadata().ok().map(|m| m.len());
-            Ok((Box::new(file), duration, None, byte_len))
+            Ok((Box::new(file), duration, None, byte_len, None))
         }
         PlaybackInput::HttpStream { url, headers } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -274,7 +301,8 @@ fn open_input(
                         .wrap_err("failed to open HTTP audio stream")
                 })
                 .wrap_err("failed to open HTTP audio stream")?;
-            Ok((Box::new(reader), None, Some(runtime), None))
+            let cancel = reader.cancellation_token();
+            Ok((Box::new(reader), None, Some(runtime), None, Some(cancel)))
         }
         PlaybackInput::ProcessStdout {
             program,
@@ -302,7 +330,8 @@ fn open_input(
                     .wrap_err("failed to open process audio stream")
                 })
                 .wrap_err("failed to open process audio stream")?;
-            Ok((Box::new(reader), None, Some(runtime), None))
+            let cancel = reader.cancellation_token();
+            Ok((Box::new(reader), None, Some(runtime), None, Some(cancel)))
         }
         // Spotify is wired up earlier in `AudioPlayer::new` and never reaches
         // the file/stream reader path.
@@ -397,6 +426,39 @@ mod tests {
             start.elapsed() < Duration::from_secs(2),
             "true seek must not block on a full decode"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a real audio output device and ffmpeg"]
+    fn drop_does_not_hang_on_stalled_process_stream() {
+        use crate::playback_input::{PlaybackInput, ProcessFormat};
+        use std::time::Duration;
+
+        // Emits ~6s of WAV (past the 256 KB stream prefetch), then stalls
+        // forever without EOF — the shape of a live stream whose upstream
+        // broadcast went quiet.
+        let input = PlaybackInput::process_stdout(
+            "sh",
+            vec![
+                "-c".to_string(),
+                "ffmpeg -v error -f lavfi -i sine=frequency=200:duration=6 -af volume=0.05 -f wav -; sleep 600"
+                    .to_string(),
+            ],
+            ProcessFormat::Wav,
+        );
+        let player = super::AudioPlayer::new(input, false).expect("player should initialize");
+        // Let playback drain the buffered audio so the decoder is blocked
+        // inside the audio callback waiting on the stalled stream.
+        std::thread::sleep(Duration::from_secs(9));
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(player);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("AudioPlayer drop wedged on a stalled stream");
     }
 
     #[test]

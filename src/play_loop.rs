@@ -764,11 +764,11 @@ fn dispatch_command(
             if let Ok(record) = track_record(track) {
                 let favorite = {
                     let storage = storage.lock().unwrap();
-                    // Playlist tracks have no history row of their own;
-                    // starring one materializes it so there's a row to flip.
-                    if state.is_playlist {
-                        storage.ensure_track_row(&record)?;
-                    }
+                    // The current track may have no history row: playlist
+                    // tracks never get one, and the user can delete the row
+                    // mid-play. Starring is a deliberate act — materialize the
+                    // row so there's one to flip instead of erroring out.
+                    storage.ensure_track_row(&record)?;
                     storage.toggle_favorite(&record.track_key)?
                 };
                 state.is_favorite = favorite;

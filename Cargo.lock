@@ -2801,6 +2801,7 @@ dependencies = [
  "symphonia",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

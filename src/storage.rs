@@ -342,10 +342,16 @@ impl Storage {
 
         let mut connection = establish_connection(&self.db_path)?;
         connection.transaction::<_, diesel::result::Error, _>(|conn| {
+            // A missing row means the user deleted it mid-play; respect the
+            // delete rather than erroring (or resurrecting the row).
             let existing_seconds = tracks::played_tracks
                 .filter(tracks::track_key.eq(track_key))
                 .select(tracks::total_play_seconds)
-                .first::<i64>(conn)?;
+                .first::<i64>(conn)
+                .optional()?;
+            let Some(existing_seconds) = existing_seconds else {
+                return Ok(());
+            };
 
             diesel::update(tracks::played_tracks.filter(tracks::track_key.eq(track_key)))
                 .set(tracks::total_play_seconds.eq(existing_seconds + played_seconds))
@@ -833,6 +839,32 @@ mod tests {
             .title_for_replay_target(&record.replay_target)
             .unwrap()
             .is_none());
+        assert!(storage
+            .list_history(HistorySortField::LastPlayed, false)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn playback_time_for_deleted_row_is_a_no_op() {
+        let (_dir, storage) = test_storage();
+        let record = TrackRecord {
+            track_key: "yt:YmQ7jRgf4f0".into(),
+            replay_target: "https://www.youtube.com/watch?v=YmQ7jRgf4f0".into(),
+            title: "Claude FM 06-11".into(),
+            platform: "YouTube".into(),
+            kind: RecordKind::Track,
+        };
+        storage.record_play(&record).unwrap();
+        storage
+            .delete_by_replay_target(&record.replay_target)
+            .unwrap();
+
+        // Deleting the currently-playing row mid-play must not turn the final
+        // play-time write into an error, nor resurrect the deleted row.
+        storage
+            .record_playback_time(&record.track_key, 42)
+            .unwrap();
         assert!(storage
             .list_history(HistorySortField::LastPlayed, false)
             .unwrap()
