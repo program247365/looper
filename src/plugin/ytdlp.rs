@@ -16,6 +16,7 @@ pub struct MetadataEntry {
     pub id: String,
     pub title: String,
     pub artist: Option<String>,
+    pub album: Option<String>,
     pub duration_secs: Option<f64>,
     pub webpage_url: String,
     pub live_status: LiveStatus,
@@ -96,6 +97,7 @@ pub fn cached_track_from_entry(entry: MetadataEntry, cache_dir: &Path, service: 
         is_live: false,
         collection: entry.collection,
         artist: entry.artist,
+        album: entry.album,
     }
 }
 
@@ -112,6 +114,7 @@ pub fn streaming_track_from_entry(entry: MetadataEntry, service: &str) -> Result
         is_live: matches!(entry.live_status, LiveStatus::IsLive),
         collection: entry.collection,
         artist: entry.artist,
+        album: entry.album,
     })
 }
 
@@ -138,6 +141,7 @@ pub fn resolve_streaming_tracks(url: &str) -> Result<Vec<TrackInfo>> {
                 is_live,
                 collection: entry.collection,
                 artist: entry.artist,
+                album: entry.album,
             })
         })
         .collect()
@@ -423,6 +427,9 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
     let artist = first_str(&value, &["artist", "creator", "uploader", "channel"])
         .map(str::to_string)
         .filter(|s| !s.is_empty());
+    let album = first_str(&value, &["album"])
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
     let duration_secs = value.get("duration").and_then(Value::as_f64);
     let webpage_url = youtube_watch_url(&value)
         .or_else(|| {
@@ -445,6 +452,7 @@ fn parse_entry(value: Value, fallback_url: &str) -> Result<MetadataEntry> {
         id,
         title,
         artist,
+        album,
         duration_secs,
         webpage_url,
         live_status,

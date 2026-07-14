@@ -291,3 +291,17 @@
 - TUI e2e gotcha for next time: grep the pty log for UI strings fails — ratatui
   writes cells with escape codes between characters; use the terminal title
   (emitted as one OSC string) as the playback-state signal instead.
+
+## 2026-07-14: Artist · album byline in the playback header
+- Added a third header line under the title showing artist and the track's own
+  album. New `album: Option<String>` on `TrackInfo` (distinct from
+  `collection`, the playlist name): Spotify stamps `track.album.name`, yt-dlp
+  parses an `album` key when present, local files stay None.
+- `AppState` gained `artist`/`album`; `header_lines` emits the byline only when
+  one exists, so local files keep the compact 2-line header. The art-anchored
+  header had spare rows (HEADER_ART_ROWS=6); only the art-less box grows,
+  its height now derived from the line count instead of a hardcoded 4.
+- Byline suppresses the album when it equals `collection` (direct album play)
+  to avoid printing the same name on two adjacent lines.
+- Verified: cargo test green (81 + 2). Unreleased — needs `make release-patch`
+  to reach the Homebrew binary.

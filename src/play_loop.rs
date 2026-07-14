@@ -1,8 +1,8 @@
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
-        MouseEvent, MouseEventKind,
+        self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, LeaveAlternateScreen},
@@ -30,9 +30,8 @@ use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, hypem, ytdlp, TrackInfo};
 use crate::storage::{collection_record, track_record, SharedStorage, Storage, SyncWarning};
 use crate::tui::{
-    draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_startup,
-    first_item, flatten_discography, flatten_results, last_item, next_item, prev_item,
-    restore_terminal,
+    draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_startup, first_item,
+    flatten_discography, flatten_results, last_item, next_item, prev_item, restore_terminal,
     setup_terminal, AppState, HistoryPanelState, ProgressTrack, SearchEntry, SearchFocus,
     SearchPanelState, SearchStatus, StartupProgressState, StartupScreenState, HEADER_ART_ROWS,
     N_BANDS,
@@ -210,7 +209,11 @@ fn browse_history_session(
                             if let Some(target) = target {
                                 search = None;
                                 match play_file_session(
-                                    terminal, title_state, &target, ctx, picker,
+                                    terminal,
+                                    title_state,
+                                    &target,
+                                    ctx,
+                                    picker,
                                 )? {
                                     SessionOutcome::Quit => {
                                         push_replica_best_effort(&storage);
@@ -282,9 +285,7 @@ fn browse_history_session(
                     KeyCommand::HistoryReplay => {
                         if let Some(row) = panel.rows.get(panel.selected) {
                             let target = row.replay_target.clone();
-                            match play_file_session(
-                                terminal, title_state, &target, ctx, picker,
-                            )? {
+                            match play_file_session(terminal, title_state, &target, ctx, picker)? {
                                 SessionOutcome::Quit => {
                                     push_replica_best_effort(&storage);
                                     return Ok(());
@@ -393,6 +394,7 @@ fn play_file_session(
                     is_live: false,
                     collection: None,
                     artist: None,
+                    album: None,
                 }],
                 false,
                 ctx,
@@ -1650,11 +1652,11 @@ fn play_single_track(
         track.thumbnail_path = fallback_cover();
     }
 
-    let (thumbnail, thumbnail_cols) = match decode_thumbnail(picker, track.thumbnail_path.as_deref())
-    {
-        Some((protocol, cols)) => (Some(protocol), cols),
-        None => (None, 0),
-    };
+    let (thumbnail, thumbnail_cols) =
+        match decode_thumbnail(picker, track.thumbnail_path.as_deref()) {
+            Some((protocol, cols)) => (Some(protocol), cols),
+            None => (None, 0),
+        };
 
     let mut state = AppState {
         filename: track.title.clone(),
@@ -1669,6 +1671,8 @@ fn play_single_track(
         total_tracks,
         is_playlist,
         collection: track.collection.clone(),
+        artist: track.artist.clone(),
+        album: track.album.clone(),
         loop_start: Instant::now(),
         pause_elapsed: Duration::default(),
         bands: vec![0.0; N_BANDS],
@@ -1838,7 +1842,9 @@ fn prepare_track_for_playback(
             // download command.
             if track.thumbnail_path.is_none() {
                 if let (Some(stem), Some(source_url)) = (
-                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string),
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string),
                     track.source_url.clone(),
                 ) {
                     if let Ok(cache_dir) = plugin::cache_dir_path() {
@@ -2134,6 +2140,8 @@ mod tests {
             total_tracks: 1,
             is_playlist: false,
             collection: None,
+            artist: None,
+            album: None,
             loop_start: Instant::now(),
             pause_elapsed: Duration::default(),
             bands: vec![0.0; N_BANDS],
@@ -2166,7 +2174,10 @@ mod tests {
     fn l_toggles_loop_in_playback_mode() {
         let state = base_state();
         assert_eq!(
-            handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &state),
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+                &state
+            ),
             KeyCommand::ToggleLoopCurrent,
         );
     }
@@ -2176,7 +2187,10 @@ mod tests {
         let mut state = base_state();
         state.history_panel = Some(HistoryPanelState::fresh());
         assert_eq!(
-            handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &state),
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+                &state
+            ),
             KeyCommand::HistorySortNext,
         );
     }
@@ -2196,11 +2210,17 @@ mod tests {
         let state = state_with_search();
         // 'q' must be text input, not Quit
         assert_eq!(
-            handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &state),
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                &state
+            ),
             KeyCommand::SearchChar('q'),
         );
         assert_eq!(
-            handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &state),
+            handle_key_event(
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                &state
+            ),
             KeyCommand::SearchBackspace,
         );
         assert_eq!(

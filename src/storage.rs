@@ -433,10 +433,9 @@ impl Storage {
         use crate::schema::played_tracks::dsl as tracks;
 
         let mut connection = establish_connection(&self.db_path)?;
-        let removed = diesel::delete(
-            tracks::played_tracks.filter(tracks::replay_target.eq(replay_target)),
-        )
-        .execute(&mut connection)?;
+        let removed =
+            diesel::delete(tracks::played_tracks.filter(tracks::replay_target.eq(replay_target)))
+                .execute(&mut connection)?;
         Ok(removed)
     }
 }
@@ -628,12 +627,20 @@ fn checkpoint_db(path: &Path) -> Result<()> {
 fn legacy_icloud_db_path() -> Option<PathBuf> {
     let home = directories::UserDirs::new()?.home_dir().to_path_buf();
     let path = home.join("Library/Mobile Documents/com~apple~CloudDocs/looper/looper.sqlite3");
-    if path.exists() { Some(path) } else { None }
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn sync_folder_config_path() -> Option<PathBuf> {
-    directories::BaseDirs::new()
-        .map(|b| b.home_dir().join(".config").join("looper").join("sync_folder"))
+    directories::BaseDirs::new().map(|b| {
+        b.home_dir()
+            .join(".config")
+            .join("looper")
+            .join("sync_folder")
+    })
 }
 
 /// Returns the user-configured sync folder, if set via `looper config set sync-folder`.
@@ -649,8 +656,8 @@ pub fn read_sync_folder_config() -> Option<PathBuf> {
 
 /// Persists the sync folder so future launches use it instead of iCloud auto-detection.
 pub fn write_sync_folder_config(folder: &Path) -> Result<()> {
-    let config_path = sync_folder_config_path()
-        .ok_or_else(|| eyre!("could not determine config directory"))?;
+    let config_path =
+        sync_folder_config_path().ok_or_else(|| eyre!("could not determine config directory"))?;
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).wrap_err("failed to create looper config directory")?;
     }
@@ -797,6 +804,7 @@ mod tests {
             is_live: false,
             collection: Some("Destiny Original Soundtrack".into()),
             artist: None,
+            album: None,
         }];
 
         let record = collection_record("https://open.spotify.com/album/abc", &tracks);
@@ -862,9 +870,7 @@ mod tests {
 
         // Deleting the currently-playing row mid-play must not turn the final
         // play-time write into an error, nor resurrect the deleted row.
-        storage
-            .record_playback_time(&record.track_key, 42)
-            .unwrap();
+        storage.record_playback_time(&record.track_key, 42).unwrap();
         assert!(storage
             .list_history(HistorySortField::LastPlayed, false)
             .unwrap()

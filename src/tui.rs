@@ -37,6 +37,10 @@ pub struct AppState {
     pub is_playlist: bool,
     /// Playlist or album name this track belongs to, shown in the header.
     pub collection: Option<String>,
+    /// Performing artist(s), shown under the title when known.
+    pub artist: Option<String>,
+    /// The track's own album (not the playlist), shown next to the artist.
+    pub album: Option<String>,
     pub loop_start: Instant,
     pub pause_elapsed: Duration,
     pub bands: Vec<f32>,
@@ -771,10 +775,16 @@ pub fn draw_history_browser(
 fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &mut AppState) {
     // When a thumbnail is loaded, the header box grows to anchor the album art
     // on the left with the Now Playing metadata beside it. Without art the
-    // header keeps its compact two-line height. Either way the visualizer
+    // header hugs its two or three metadata lines. Either way the visualizer
     // below spans the full width.
     let has_thumb = state.thumbnail.is_some();
-    let header_height = if has_thumb { HEADER_ART_ROWS + 2 } else { 4 };
+    let lines = header_lines(state);
+    let text_height = lines.len() as u16;
+    let header_height = if has_thumb {
+        HEADER_ART_ROWS + 2
+    } else {
+        text_height + 2
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -801,19 +811,19 @@ fn draw_normal_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(art_cols), Constraint::Min(0)])
             .split(inner);
-        // Vertically center the two metadata lines within the taller header.
+        // Vertically center the metadata lines within the taller header.
         let text_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Length(2),
+                Constraint::Length(text_height),
                 Constraint::Min(0),
             ])
             .split(columns[1]);
-        frame.render_widget(Paragraph::new(header_lines(state)), text_rows[1]);
+        frame.render_widget(Paragraph::new(lines), text_rows[1]);
         Some(columns[0])
     } else {
-        draw_header(frame, chunks[0], state);
+        draw_header(frame, chunks[0], lines);
         None
     };
 
@@ -845,17 +855,17 @@ fn draw_fullscreen_in(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, s
 
 // ── Header ────────────────────────────────────────────────────────────────────
 
-fn draw_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+fn draw_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, lines: Vec<Line<'static>>) {
     let block = Block::default()
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Rgb(60, 60, 80)));
-    frame.render_widget(Paragraph::new(header_lines(state)).block(block), area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Builds the two-line Now Playing header: service badge, favorite star,
-/// title, and play status on top; collection/loop info, cache badge, and the
-/// fullscreen hint below. Shared by the plain header and the art-anchored
-/// header so both stay in sync.
+/// Builds the Now Playing header: service badge, favorite star, title, and
+/// play status on top; artist · album beneath the title when known; then
+/// collection/loop info, cache badge, and the fullscreen hint. Shared by the
+/// plain header and the art-anchored header so both stay in sync.
 fn header_lines(state: &AppState) -> Vec<Line<'static>> {
     let (status_text, status_color) = if state.paused {
         ("⏸  PAUSED", Color::Yellow)
@@ -874,7 +884,10 @@ fn header_lines(state: &AppState) -> Vec<Line<'static>> {
         )
     } else if state.is_playlist {
         let base = match &state.collection {
-            Some(name) => format!("{name} · Track {}/{}", state.track_index, state.total_tracks),
+            Some(name) => format!(
+                "{name} · Track {}/{}",
+                state.track_index, state.total_tracks
+            ),
             None => format!("Track {}/{}", state.track_index, state.total_tracks),
         };
         if state.loop_armed {
@@ -907,41 +920,61 @@ fn header_lines(state: &AppState) -> Vec<Line<'static>> {
 
     let service_badge = service_badge(&state.service);
 
-    let text = vec![
-        Line::from(vec![
-            Span::styled("  ♪  ", Style::default().fg(Color::Rgb(255, 180, 80))),
-            service_badge,
-            Span::raw(" "),
-            favorite_badge(state.is_favorite),
-            Span::raw(if state.is_favorite { " " } else { "" }),
-            Span::styled(
-                state.filename.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(status_text, Style::default().fg(status_color)),
-        ]),
-        Line::from(vec![
+    // Artist · album line under the title. The album is dropped when it's the
+    // same name as the collection (playing an album directly), since the
+    // metadata line below already shows it.
+    let album = state
+        .album
+        .as_deref()
+        .filter(|album| state.collection.as_deref() != Some(album));
+    let byline = match (state.artist.as_deref(), album) {
+        (Some(artist), Some(album)) => Some(format!("{artist} · {album}")),
+        (Some(artist), None) => Some(artist.to_string()),
+        (None, Some(album)) => Some(album.to_string()),
+        (None, None) => None,
+    };
+
+    let mut text = vec![Line::from(vec![
+        Span::styled("  ♪  ", Style::default().fg(Color::Rgb(255, 180, 80))),
+        service_badge,
+        Span::raw(" "),
+        favorite_badge(state.is_favorite),
+        Span::raw(if state.is_favorite { " " } else { "" }),
+        Span::styled(
+            state.filename.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(status_text, Style::default().fg(status_color)),
+    ])];
+
+    if let Some(byline) = byline {
+        text.push(Line::from(vec![
             Span::raw("       "),
-            Span::styled(secondary_text, secondary_style),
-            if let Some(badge) = cache_badge {
-                Span::styled(
-                    format!("  {badge}"),
-                    Style::default()
-                        .fg(Color::Rgb(255, 180, 80))
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw("")
-            },
+            Span::styled(byline, Style::default().fg(Color::Rgb(180, 180, 200))),
+        ]));
+    }
+
+    text.push(Line::from(vec![
+        Span::raw("       "),
+        Span::styled(secondary_text, secondary_style),
+        if let Some(badge) = cache_badge {
             Span::styled(
-                "  [f] fullscreen",
-                Style::default().fg(Color::Rgb(80, 80, 100)),
-            ),
-        ]),
-    ];
+                format!("  {badge}"),
+                Style::default()
+                    .fg(Color::Rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("")
+        },
+        Span::styled(
+            "  [f] fullscreen",
+            Style::default().fg(Color::Rgb(80, 80, 100)),
+        ),
+    ]));
 
     text
 }
@@ -1755,7 +1788,10 @@ fn draw_delete_confirm(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, 
                     .fg(Color::Rgb(255, 120, 100))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" delete    ", Style::default().fg(Color::Rgb(150, 150, 170))),
+            Span::styled(
+                " delete    ",
+                Style::default().fg(Color::Rgb(150, 150, 170)),
+            ),
             Span::styled(
                 "[n]",
                 Style::default()
@@ -1864,6 +1900,8 @@ mod tests {
             total_tracks: 12,
             is_playlist: false,
             collection: None,
+            artist: None,
+            album: None,
             loop_start: Instant::now(),
             pause_elapsed: Duration::default(),
             bands: vec![0.0; 4],
@@ -1887,7 +1925,9 @@ mod tests {
     }
 
     fn secondary_line(state: &AppState) -> String {
-        header_lines(state)[1]
+        header_lines(state)
+            .last()
+            .unwrap()
             .spans
             .iter()
             .map(|span| span.content.as_ref())
@@ -1909,6 +1949,30 @@ mod tests {
         state.loop_armed = false;
         state.solo_loop = true;
         assert!(secondary_line(&state).contains("∞ looping track · Loop #4 · [n] resume playlist"));
+    }
+
+    #[test]
+    fn header_byline_shows_artist_and_album() {
+        let mut state = playback_state();
+        assert_eq!(header_lines(&state).len(), 2);
+
+        state.artist = Some("Twenty One Pilots".into());
+        state.album = Some("Clancy".into());
+        let lines = header_lines(&state);
+        assert_eq!(lines.len(), 3);
+        let byline: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(byline.contains("Twenty One Pilots · Clancy"));
+
+        // Playing an album directly: the album name already appears on the
+        // collection line below, so the byline keeps only the artist.
+        state.collection = Some("Clancy".into());
+        let byline: String = header_lines(&state)[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(byline.contains("Twenty One Pilots"));
+        assert!(!byline.contains("Clancy"));
     }
 
     fn item(title: &str) -> crate::spotify::SearchItem {
@@ -2113,10 +2177,7 @@ mod tests {
         terminal
             .draw(|frame| draw_history_browser(frame, &panel, None))
             .unwrap();
-        assert!(buffer_contains(
-            &terminal,
-            "≡ Destiny Original Soundtrack"
-        ));
+        assert!(buffer_contains(&terminal, "≡ Destiny Original Soundtrack"));
         assert!(buffer_contains(&terminal, "The Path"));
         assert!(!buffer_contains(&terminal, "≡ The Path"));
     }

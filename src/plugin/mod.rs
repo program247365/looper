@@ -30,6 +30,9 @@ pub struct TrackInfo {
     /// Performing artist(s), when the source provides them. Surfaced in the OS
     /// Now Playing widget; falls back to the service name when absent.
     pub artist: Option<String>,
+    /// The track's own album, when the source provides one. Distinct from
+    /// `collection`: a playlist track's `collection` is the playlist name.
+    pub album: Option<String>,
 }
 
 pub trait ServicePlugin {

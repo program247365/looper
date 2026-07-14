@@ -156,6 +156,7 @@ fn track_info(
                 .join(", "),
         )
     };
+    let album = Some(track.album.name.clone()).filter(|name| !name.is_empty());
     TrackInfo {
         title: track.name,
         duration_secs: Some((track.duration.max(0) as f64) / 1000.0),
@@ -167,6 +168,7 @@ fn track_info(
         is_live: false,
         collection,
         artist,
+        album,
     }
 }
 
@@ -259,9 +261,11 @@ async fn download_cover(
 /// "track unavailable" modal instead of playing silence. Used only for a single
 /// directly-requested track; playlist/album tracks are dropped at resolve.
 async fn ensure_track_available(session: &Session, uri: &SpotifyUri) -> Result<()> {
-    let item = AudioItem::get_file(session, uri.clone()).await.map_err(|_| {
-        eyre!("this Spotify track couldn't be loaded (it may be removed or region-locked)")
-    })?;
+    let item = AudioItem::get_file(session, uri.clone())
+        .await
+        .map_err(|_| {
+            eyre!("this Spotify track couldn't be loaded (it may be removed or region-locked)")
+        })?;
     let has_alternative = item
         .alternatives
         .as_ref()
@@ -481,14 +485,20 @@ mod tests {
     #[test]
     fn parses_track_url_to_uri() {
         let uri = parse_uri("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=x").unwrap();
-        assert_eq!(uri.to_uri().unwrap(), "spotify:track:4uLU6hMCjMI75M1A2tKUQC");
+        assert_eq!(
+            uri.to_uri().unwrap(),
+            "spotify:track:4uLU6hMCjMI75M1A2tKUQC"
+        );
     }
 
     #[test]
     fn parses_intl_prefixed_url() {
         let uri =
             parse_uri("https://open.spotify.com/intl-de/track/4uLU6hMCjMI75M1A2tKUQC").unwrap();
-        assert_eq!(uri.to_uri().unwrap(), "spotify:track:4uLU6hMCjMI75M1A2tKUQC");
+        assert_eq!(
+            uri.to_uri().unwrap(),
+            "spotify:track:4uLU6hMCjMI75M1A2tKUQC"
+        );
     }
 
     #[test]
