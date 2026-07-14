@@ -138,7 +138,9 @@ mod tests {
     #[test]
     fn leaves_plain_paths_untouched() {
         assert_eq!(
-            file_url(Path::new("/Users/kevin/Library/Caches/sh.kbr.looper/spotify/art/ab12.jpg")),
+            file_url(Path::new(
+                "/Users/kevin/Library/Caches/sh.kbr.looper/spotify/art/ab12.jpg"
+            )),
             "file:///Users/kevin/Library/Caches/sh.kbr.looper/spotify/art/ab12.jpg"
         );
     }

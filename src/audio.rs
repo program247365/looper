@@ -1,6 +1,8 @@
 use color_eyre::eyre::{Result, WrapErr};
 use rodio::source::SeekError;
-use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source};
+use rodio::{
+    ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source,
+};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};

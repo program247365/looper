@@ -61,9 +61,7 @@ fn normalize_youtube_url(url: &str) -> String {
         None => return url.to_string(),
     };
 
-    let list_param = query
-        .split('&')
-        .find(|part| part.starts_with("list="));
+    let list_param = query.split('&').find(|part| part.starts_with("list="));
 
     match list_param {
         Some(list) => format!("https://www.youtube.com/playlist?{list}"),
@@ -95,9 +93,8 @@ mod tests {
 
     #[test]
     fn extra_params_are_dropped_in_favor_of_list() {
-        let got = normalize_youtube_url(
-            "https://www.youtube.com/watch?v=abc&list=PLxyz&index=3&t=42s",
-        );
+        let got =
+            normalize_youtube_url("https://www.youtube.com/watch?v=abc&list=PLxyz&index=3&t=42s");
         assert_eq!(got, "https://www.youtube.com/playlist?list=PLxyz");
     }
 }

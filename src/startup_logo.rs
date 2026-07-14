@@ -76,7 +76,8 @@ fn cell_span(
             let threshold = reveal_threshold(row, col);
             if p < threshold {
                 static_span(is_ink, row, col, frame)
-            } else if is_ink && p < 1.0 && p - threshold < FLASH_WINDOW && flickers(row, col, frame) {
+            } else if is_ink && p < 1.0 && p - threshold < FLASH_WINDOW && flickers(row, col, frame)
+            {
                 // Freshly crossed the threshold: pop white-hot for a frame
                 // before settling into the wordmark color.
                 flash_span()

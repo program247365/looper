@@ -42,7 +42,14 @@ pub fn fetch_thumbnail(url: &str, cache_dir: &Path) -> Option<PathBuf> {
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?;
-    let html = client.get(url).send().ok()?.error_for_status().ok()?.text().ok()?;
+    let html = client
+        .get(url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .text()
+        .ok()?;
     let image_url = extract_og_image(&html)?;
     let bytes = client
         .get(&image_url)
@@ -94,7 +101,10 @@ mod tests {
             track_id("https://hypem.com/track/39jtp/Artist+-+Song").as_deref(),
             Some("39jtp")
         );
-        assert_eq!(track_id("https://hypem.com/track/39jtp").as_deref(), Some("39jtp"));
+        assert_eq!(
+            track_id("https://hypem.com/track/39jtp").as_deref(),
+            Some("39jtp")
+        );
         assert_eq!(track_id("https://soundcloud.com/foo/bar"), None);
         assert_eq!(track_id("https://hypem.com/popular"), None);
     }

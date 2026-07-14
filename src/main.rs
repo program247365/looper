@@ -96,13 +96,11 @@ enum Command {
     ///
     /// Remote tracks are cached locally after the first download.
     /// Playlists are prefetched in the background for gapless playback.
-    #[structopt(
-        after_help = "\
+    #[structopt(after_help = "\
 EXAMPLES:
     looper play --url ~/music/focus.mp3
     looper play --url https://www.youtube.com/watch?v=dQw4w9WgXcQ
-    looper play --url https://soundcloud.com/artist/track-name"
-    )]
+    looper play --url https://soundcloud.com/artist/track-name")]
     Play {
         /// Path to a local audio file or a remote URL (YouTube, SoundCloud, HypeM)
         #[structopt(short, long)]
@@ -234,7 +232,9 @@ fn cmd_spotify(cmd: SpotifyCmd) -> Result<()> {
 
 fn cmd_config(cmd: ConfigCmd) -> Result<()> {
     match cmd {
-        ConfigCmd::Set { key: ConfigKey::SyncFolder { path } } => {
+        ConfigCmd::Set {
+            key: ConfigKey::SyncFolder { path },
+        } => {
             let folder = std::path::Path::new(&path);
             storage::write_sync_folder_config(folder)?;
             println!("Replication folder set to: {path}");
@@ -253,7 +253,10 @@ fn cmd_config(cmd: ConfigCmd) -> Result<()> {
             }
         }
         ConfigCmd::Show => match storage::read_sync_folder_config() {
-            Some(folder) => println!("sync_folder = {} (replicated on startup/quit)", folder.display()),
+            Some(folder) => println!(
+                "sync_folder = {} (replicated on startup/quit)",
+                folder.display()
+            ),
             None => println!("sync_folder = (none — local DB only, no replication)"),
         },
     }
