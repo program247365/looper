@@ -152,7 +152,20 @@ fn main() -> Result<()> {
     color_eyre::install()?;
     let opt = Opt::from_args();
 
-    run_app(opt)
+    if let Err(err) = run_app(opt) {
+        print_fatal(&err);
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn print_fatal(err: &color_eyre::Report) {
+    if is_disk_full_error(err) {
+        eprintln!("looper: your disk is full (or the drive hit an I/O error).");
+        eprintln!("Free up some space and try again.");
+    } else {
+        eprintln!("{err:?}");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -186,7 +199,7 @@ fn run_app(opt: Opt) -> Result<()> {
         match result {
             Ok(()) => 0,
             Err(err) => {
-                eprintln!("{err:?}");
+                print_fatal(&err);
                 1
             }
         }
@@ -263,6 +276,18 @@ fn cmd_config(cmd: ConfigCmd) -> Result<()> {
     Ok(())
 }
 
+fn is_disk_full_error(err: &color_eyre::Report) -> bool {
+    err.chain().any(|cause| {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if io_err.raw_os_error() == Some(libc::ENOSPC) {
+                return true;
+            }
+        }
+        let msg = cause.to_string();
+        msg.contains("disk I/O error") || msg.contains("No space left on device")
+    })
+}
+
 fn is_under_icloud_drive(path: &std::path::Path) -> bool {
     let Some(home) = directories::UserDirs::new().map(|d| d.home_dir().to_path_buf()) else {
         return false;
@@ -289,5 +314,37 @@ mod tests {
             opt.cmd,
             Some(Command::Play { ref url }) if url == "sound.mp3"
         ));
+    }
+
+    #[test]
+    fn detects_sqlite_disk_io_error_in_chain() {
+        use color_eyre::eyre::WrapErr;
+        use diesel::result::{DatabaseErrorKind, Error as DieselError};
+
+        let sqlite_err = DieselError::DatabaseError(
+            DatabaseErrorKind::Unknown,
+            Box::new("disk I/O error".to_string()),
+        );
+        let report = Err::<(), _>(sqlite_err)
+            .wrap_err("failed to load history")
+            .unwrap_err();
+        assert!(is_disk_full_error(&report));
+    }
+
+    #[test]
+    fn detects_no_space_left_io_error_in_chain() {
+        use color_eyre::eyre::WrapErr;
+
+        let enospc = std::io::Error::from_raw_os_error(libc::ENOSPC);
+        let report = Err::<(), _>(enospc)
+            .wrap_err("failed to cache track")
+            .unwrap_err();
+        assert!(is_disk_full_error(&report));
+    }
+
+    #[test]
+    fn ignores_unrelated_errors() {
+        let report = color_eyre::eyre::eyre!("track unavailable");
+        assert!(!is_disk_full_error(&report));
     }
 }
