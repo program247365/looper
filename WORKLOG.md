@@ -305,3 +305,24 @@
   to avoid printing the same name on two adjacent lines.
 - Verified: cargo test green (81 + 2). Unreleased — needs `make release-patch`
   to reach the Homebrew binary.
+
+## 2026-07-28: Friendly disk-full error message; released v0.13.4
+- A full disk crashed looper with a color-eyre backtrace (`SQLITE_IOERR` from
+  the history DB surfacing at `storage.rs`, propagated fatal via `?`).
+  Considered four options (friendly fatal message / degrade history to no-op
+  with a banner / preflight free-space check / cache eviction); chose the
+  smallest: intercept at the fatal boundary.
+- `is_disk_full_error` in `main.rs` walks the eyre chain: downcasts
+  `io::Error` to check errno `ENOSPC`, and string-matches "disk I/O error"
+  (SQLite gives diesel no structured code — `DatabaseErrorKind::Unknown`) and
+  "No space left on device" for eyre!-flattened errors. `print_fatal` prints a
+  two-line hint for those, the normal color-eyre report otherwise; wired into
+  both exit paths (macOS worker closure and main's Result).
+- TDD: 3 new tests in `main.rs` (diesel DatabaseError chain, ENOSPC io chain,
+  negative case); suite green (84 + 2).
+- Deleted stale `.idea/` (JetBrains config from March 2022, untracked).
+- Released v0.13.4 via `make release-patch`: tag pushed, CI arm64 asset
+  attached, tap formula updated (homebrew-tap 8c9075e).
+- Revisit next time: option 2 (degrade history writes to best-effort with a
+  persistent banner, like `SyncWarning`) if disk-full exits get annoying —
+  playback doesn't need the DB.
