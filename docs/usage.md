@@ -75,7 +75,9 @@ looper play --url "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
 | `Space` | Pause / resume |
 | `Left` / `Right` | Seek backward / forward 5 seconds |
 | Click / drag progress bar | Scrub to any position (commits on release) |
+| `-` / `+` | Volume down / up (~2 dB per press, shown as `Vol n%` in the footer) |
 | `n` / `b` | Next / previous track (playlist mode) |
+| `l` | Loop the current playlist track (press again to disarm; `n`/`b` resume the playlist) |
 | `f` | Toggle fullscreen visualizer |
 | `s` | Toggle favorite for the current track |
 | `p` / `Esc` | Toggle the played-songs panel |
@@ -84,6 +86,11 @@ looper play --url "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
 
 Seeking (arrow keys or progress-bar drag) is available for local files and
 cached downloads. Live or stream-first sources ignore seek input.
+
+Volume is software gain on the player itself, so it works for every source —
+including Spotify — and steps finer than the coarse hardware increments many
+USB audio devices expose. The level persists per machine (in
+`~/.config/looper/volume`) and carries across tracks and restarts.
 
 Hardware/OS media keys (play/pause/next/previous) also work while looper is in
 the background — see [Now Playing & Media Keys](now-playing.md).
@@ -99,10 +106,11 @@ hidden by default and opens over the minimal UI.
 | `h` / `l` | Change sort field |
 | `r` | Reverse sort direction |
 | `s` | Toggle favorite for the selected row |
+| `d` | Delete the selected row (`y` to confirm) |
 | `Enter` | Replay the selected track |
 | `p` / `Esc` | Close the panel |
 
-Sort fields: time played, last played, platform, title, times played.
+Sort fields: time played, last played, favorites, platform, title, times played.
 
 ## Spotify search
 

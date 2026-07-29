@@ -15,6 +15,7 @@ zone.
 - **Real-time visualizer** — a log-spaced FFT scatter with a fullscreen mode (`f`)
 - **Loops the way you want** — single tracks forever; playlists and albums play through, then repeat
 - **Native Now Playing** — album art, artist, and album in macOS Control Center / lock screen and Linux MPRIS, plus play/pause/next/previous media keys
+- **Software volume** — `-`/`+` trim playback in ~2 dB steps below your hardware's coarse volume steps, persisted per machine
 - **Remembers everything** — SQLite-backed history and favorites, with optional cross-device sync
 - **Offline-first and resilient** — a fast local DB, cached downloads, automatic Spotify reconnect, and graceful handling of dead links
 
@@ -43,12 +44,26 @@ looper spotify login
 looper play --url "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
 ```
 
-Press `f` for fullscreen, `space` to pause, `p` for history, `q` to quit. More
-examples and keybindings in [Usage & Keys](docs/usage.md).
+Press `f` for fullscreen, `space` to pause, `-`/`+` for volume, `p` for
+history, `q` to quit. More examples and keybindings in
+[Usage & Keys](docs/usage.md).
 
 Want in-app Spotify search (`/` to find and loop a song, album, or playlist)?
 That takes a free Spotify API app of your own — one-time setup in
 [Spotify → Search](docs/spotify.md#search-optional).
+
+## Screenshots
+
+![Playlist history browser](screenshots/history.png)
+
+*The history browser — bare `looper` opens here. Every track and playlist
+you've played, sortable by favorites, last played, or time played; `Enter`
+replays anything, `s` stars a favorite.*
+
+![Loading screen](screenshots/loading.png)
+
+*Resolving a SoundCloud link — remote tracks get an in-TUI loading scene with
+progress instead of raw log output.*
 
 ## Documentation
 
