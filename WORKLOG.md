@@ -342,5 +342,8 @@
 - Tests: key-mapping + step-curve unit tests (88 green). E2E via pty
   (`script` + fifo, per memory recipe): seeded 0.05, presses moved the config
   file 0.05 → 0.0397 → 0.0315 → 0.0397, clean quit. Left the file at 0.5.
+- Released v0.14.0 (minor — new user-facing feature) via `make release-minor`:
+  tag pushed, CI arm64 asset attached, tap formula updated (homebrew-tap
+  c978cef).
 - Revisit next time: mouse scroll-wheel volume; showing volume in the
   fullscreen micro-status; possible mute toggle.
