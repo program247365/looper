@@ -20,6 +20,7 @@ Media keys work even while looper is in the background:
 | Play / Pause | Toggle pause |
 | Next | Skip to the next track (playlist mode) |
 | Previous | Skip to the previous track (playlist mode) |
+| Stop | Quit looper |
 
 On macOS this uses `MPRemoteCommandCenter` + `MPNowPlayingInfoCenter`; on Linux,
 MPRIS over D-Bus. Windows is not wired up.

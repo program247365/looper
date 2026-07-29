@@ -37,6 +37,9 @@ Remote tracks are cached locally after download:
 Spotify keeps its cached credentials, encrypted audio cache, and album art in a
 `spotify/` subfolder of the cache directory above.
 
+Per-machine settings live in `~/.config/looper/` — the [sync folder](sync.md)
+(`sync_folder`) and the persisted volume level (`volume`).
+
 Playback history and favorites live in a SQLite database (`looper.sqlite3`).
 Where it lives depends on your sync setup — see [Cross-device sync](sync.md).
 
@@ -44,7 +47,10 @@ Where it lives depends on your sync setup — see [Cross-device sync](sync.md).
   needed when upgrading
 - bare `looper` loads this history first and lets you replay from it
 - history is tracked per playable URL or canonical local file path
-- each track stores title, platform, favorite state, last played timestamp, play
+- a playlist or album records a single replayable collection row (shown with a
+  `≡` prefix) rather than a row per track; a track inside a playlist gets its
+  own row only when you star it or solo-loop it
+- each row stores title, platform, favorite state, last played timestamp, play
   count, cumulative time played, and which computer played it last
 
 ## Notes & quirks
