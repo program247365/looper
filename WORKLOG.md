@@ -347,3 +347,15 @@
   c978cef).
 - Revisit next time: mouse scroll-wheel volume; showing volume in the
   fullscreen micro-status; possible mute toggle.
+
+## 2026-07-29: Refreshed README screenshots and closed keyboard-doc drift
+
+- Replaced `screenshots/looper.png` with a v0.14.0 playback shot (footer now
+  shows `[-/+] Vol`); added `screenshots/history.png` and
+  `screenshots/loading.png` to the README with captions.
+- Local checkout was still at v0.13.4 — the volume feature only existed on
+  `origin/main`. Pulled first, then documented against the real code.
+- Docs catch-up in `docs/usage.md`: `-`/`+` volume (with persistence notes),
+  `l` loop-this-track, `d` delete in the history panel, Favorites sort field.
+  README highlights and quick-start now mention volume.
+- Revisit next time: nothing pending from this session.
