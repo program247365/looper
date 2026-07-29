@@ -40,6 +40,7 @@ takes care of moving `looper.sqlite3` between machines in the background.
 ```shell
 looper config show
 # sync_folder = /Users/you/Library/Mobile Documents/.../looper (replicated on startup/quit)
+# volume = 100% (adjust with -/+ during playback)
 
 ls "$HOME/Library/Mobile Documents/com~apple~CloudDocs/looper/"
 # looper.sqlite3

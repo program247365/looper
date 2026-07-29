@@ -62,6 +62,7 @@ TUI CONTROLS:
     q / Ctrl-C     Quit
     Space          Pause / resume
     Left / Right   Seek backward / forward 5 seconds (local/cached)
+    - / +          Volume down / up (persisted per machine)
     n              Next track (playlist mode)
     b              Previous track (playlist mode)
     f              Toggle fullscreen visualizer
@@ -265,13 +266,22 @@ fn cmd_config(cmd: ConfigCmd) -> Result<()> {
                 );
             }
         }
-        ConfigCmd::Show => match storage::read_sync_folder_config() {
-            Some(folder) => println!(
-                "sync_folder = {} (replicated on startup/quit)",
-                folder.display()
-            ),
-            None => println!("sync_folder = (none — local DB only, no replication)"),
-        },
+        ConfigCmd::Show => {
+            match storage::read_sync_folder_config() {
+                Some(folder) => println!(
+                    "sync_folder = {} (replicated on startup/quit)",
+                    folder.display()
+                ),
+                None => println!("sync_folder = (none — local DB only, no replication)"),
+            }
+            match storage::read_volume_config() {
+                Some(volume) => println!(
+                    "volume = {:.0}% (adjust with -/+ during playback)",
+                    volume * 100.0
+                ),
+                None => println!("volume = 100% (default — adjust with -/+ during playback)"),
+            }
+        }
     }
     Ok(())
 }
