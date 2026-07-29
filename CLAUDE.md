@@ -283,6 +283,13 @@ There are now two major UI modes:
 ## Notable Design Decisions
 
 - `reattach_stdin_to_tty()` (Unix only) reopens `/dev/tty` when stdin is piped so crossterm still works
+- `-`/`+` step software volume ~2 dB per press (multiplicative — linear steps
+  feel uneven): rodio sink gain clamped to `0.01..=1.0`, shown in the footer as
+  `Vol n%`. Persisted per-machine in `~/.config/looper/volume` — deliberately
+  **not** in the synced SQLite DB, since volume compensates for this machine's
+  DAC/amp — and re-applied to each track's fresh `AudioPlayer` in
+  `play_single_track`. Covers every source including Spotify because librespot
+  PCM flows through the same rodio `Player`.
 - loop counting for repeated single tracks uses wall-clock elapsed time because `repeat_infinite()` does not reset sink position
 - per-band AGC keeps the scatter visualizer lively across different mixes
 - YouTube currently favors reliability over immediacy: cached download-first instead of direct stream-first

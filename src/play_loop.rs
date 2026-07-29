@@ -28,7 +28,10 @@ use crate::download::{DownloadEvent, LoadingPhase};
 use crate::media_controls::MediaSessionHandle;
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, hypem, ytdlp, TrackInfo};
-use crate::storage::{collection_record, track_record, SharedStorage, Storage, SyncWarning};
+use crate::storage::{
+    collection_record, read_volume_config, track_record, write_volume_config, SharedStorage,
+    Storage, SyncWarning,
+};
 use crate::tui::{
     draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_startup, first_item,
     flatten_discography, flatten_results, last_item, next_item, prev_item, restore_terminal,
@@ -305,6 +308,8 @@ fn browse_history_session(
                     | KeyCommand::ToggleFullscreen
                     | KeyCommand::ToggleFavorite
                     | KeyCommand::ToggleLoopCurrent
+                    | KeyCommand::VolumeUp
+                    | KeyCommand::VolumeDown
                     | KeyCommand::ToggleHistory
                     | KeyCommand::SearchChar(_)
                     | KeyCommand::SearchBackspace
@@ -705,6 +710,23 @@ fn run_loop(
     }
 }
 
+/// One volume keypress moves ~2 dB. Loudness perception is logarithmic, so
+/// multiplicative steps feel even across the range where fixed linear steps
+/// would jump near zero and stall near full volume.
+const VOLUME_STEP: f32 = 1.258_925; // 10^(2/20)
+/// Floor of -40 dB instead of 0.0: the quietest setting stays audible, so a
+/// forgotten low volume looks like "very quiet" rather than "broken".
+const MIN_VOLUME: f32 = 0.01;
+const MAX_VOLUME: f32 = 1.0;
+
+fn volume_up(volume: f32) -> f32 {
+    (volume * VOLUME_STEP).clamp(MIN_VOLUME, MAX_VOLUME)
+}
+
+fn volume_down(volume: f32) -> f32 {
+    (volume / VOLUME_STEP).clamp(MIN_VOLUME, MAX_VOLUME)
+}
+
 fn dispatch_command(
     cmd: KeyCommand,
     state: &mut AppState,
@@ -791,6 +813,19 @@ fn dispatch_command(
                 };
                 *needs_render = true;
             }
+            Ok(None)
+        }
+        KeyCommand::VolumeUp | KeyCommand::VolumeDown => {
+            state.volume = if matches!(cmd, KeyCommand::VolumeUp) {
+                volume_up(state.volume)
+            } else {
+                volume_down(state.volume)
+            };
+            player.sink.set_volume(state.volume);
+            // Best-effort persistence; a failed write only means the next
+            // launch starts from the previous volume.
+            let _ = write_volume_config(state.volume);
+            *needs_render = true;
             Ok(None)
         }
         KeyCommand::ToggleHistory => {
@@ -1122,6 +1157,8 @@ pub(crate) enum KeyCommand {
     ToggleFullscreen,
     ToggleFavorite,
     ToggleLoopCurrent,
+    VolumeUp,
+    VolumeDown,
     ToggleHistory,
     HistoryNext,
     HistoryPrev,
@@ -1185,6 +1222,8 @@ fn handle_key_event(key: KeyEvent, state: &AppState) -> KeyCommand {
             (KeyCode::Char('f'), _) => KeyCommand::ToggleFullscreen,
             (KeyCode::Char('s'), _) => KeyCommand::ToggleFavorite,
             (KeyCode::Char('l'), _) => KeyCommand::ToggleLoopCurrent,
+            (KeyCode::Char('-'), _) => KeyCommand::VolumeDown,
+            (KeyCode::Char('='), _) | (KeyCode::Char('+'), _) => KeyCommand::VolumeUp,
             (KeyCode::Char('/'), _) => KeyCommand::SearchOpen,
             (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
                 KeyCommand::ToggleHistory
@@ -1624,6 +1663,10 @@ fn play_single_track(
     )?;
     let loops_forever = (!is_playlist || solo_loop) && !track.is_live;
     let player = AudioPlayer::new(track.playback.clone(), loops_forever)?;
+    // Each track gets a fresh player, so re-apply the user's volume here or it
+    // would snap back to full on every track change.
+    let volume = read_volume_config().unwrap_or(MAX_VOLUME);
+    player.sink.set_volume(volume);
     wait_for_player_ready(
         terminal,
         title_state,
@@ -1692,6 +1735,7 @@ fn play_single_track(
         loop_armed: false,
         solo_loop,
         loop_anim_start: None,
+        volume,
     };
 
     if let Some(media) = &ctx.media {
@@ -2161,6 +2205,7 @@ mod tests {
             loop_armed: false,
             solo_loop: false,
             loop_anim_start: None,
+            volume: 1.0,
         }
     }
 
@@ -2193,6 +2238,40 @@ mod tests {
             ),
             KeyCommand::HistorySortNext,
         );
+    }
+
+    #[test]
+    fn volume_keys_map_in_playback_mode() {
+        let state = base_state();
+        assert_eq!(
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE),
+                &state
+            ),
+            KeyCommand::VolumeDown,
+        );
+        for key in ['=', '+'] {
+            assert_eq!(
+                handle_key_event(
+                    KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    &state
+                ),
+                KeyCommand::VolumeUp,
+            );
+        }
+    }
+
+    #[test]
+    fn volume_steps_are_multiplicative_and_clamped() {
+        // A step up from max stays at max; a step down is ~2 dB quieter.
+        assert_eq!(volume_up(1.0), MAX_VOLUME);
+        let down = volume_down(1.0);
+        assert!(down > 0.79 && down < 0.80, "expected ~-2 dB, got {down}");
+        // Up undoes down (multiplicative symmetry).
+        assert!((volume_up(down) - 1.0).abs() < 1e-3);
+        // The floor holds instead of decaying to silence.
+        assert_eq!(volume_down(MIN_VOLUME), MIN_VOLUME);
+        assert!(volume_down(MIN_VOLUME * 1.1) >= MIN_VOLUME);
     }
 
     #[test]

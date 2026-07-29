@@ -326,3 +326,21 @@
 - Revisit next time: option 2 (degrade history writes to best-effort with a
   persistent banner, like `SyncWarning`) if disk-full exits get annoying —
   playback doesn't need the DB.
+
+## 2026-07-29: Software volume control (`-`/`+`) with per-machine persistence
+- Motivation: Kevin's HyperX QuadCast S headphone amp is hot — even OS volume
+  6/100 is loud, and USB hardware volume steps are too coarse. Software gain
+  on the rodio sink trims below what the OS slider can reach.
+- Added `KeyCommand::VolumeUp/VolumeDown` (`-` and `=`/`+` in playback mode),
+  ~2 dB multiplicative steps (`VOLUME_STEP = 10^(2/20)`), clamped 0.01–1.0.
+  Footer shows `[-/+] Vol n%`.
+- Persisted in `~/.config/looper/volume` (mirrors the `sync_folder` config-file
+  pattern) — deliberately per-machine, not in the synced DB. Read and applied
+  after each `AudioPlayer::new` in `play_single_track`, so playlists/solo-loop
+  track changes keep the level.
+- Works for Spotify too: librespot PCM feeds the same rodio `Player`.
+- Tests: key-mapping + step-curve unit tests (88 green). E2E via pty
+  (`script` + fifo, per memory recipe): seeded 0.05, presses moved the config
+  file 0.05 → 0.0397 → 0.0315 → 0.0397, clean quit. Left the file at 0.5.
+- Revisit next time: mouse scroll-wheel volume; showing volume in the
+  fullscreen micro-status; possible mute toggle.

@@ -654,6 +654,33 @@ pub fn read_sync_folder_config() -> Option<PathBuf> {
     }
 }
 
+fn volume_config_path() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|b| b.home_dir().join(".config").join("looper").join("volume"))
+}
+
+/// Returns the persisted playback volume (linear amplitude, `0.01..=1.0`).
+/// Deliberately not stored in the synced SQLite DB — volume is a per-machine
+/// setting (it compensates for whatever DAC/amp this machine plays through).
+pub fn read_volume_config() -> Option<f32> {
+    let raw = fs::read_to_string(volume_config_path()?).ok()?;
+    let volume: f32 = raw.trim().parse().ok()?;
+    if volume.is_finite() {
+        Some(volume.clamp(0.01, 1.0))
+    } else {
+        None
+    }
+}
+
+/// Persists the playback volume so it survives restarts.
+pub fn write_volume_config(volume: f32) -> Result<()> {
+    let config_path =
+        volume_config_path().ok_or_else(|| eyre!("could not determine config directory"))?;
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).wrap_err("failed to create looper config directory")?;
+    }
+    fs::write(&config_path, format!("{volume}")).wrap_err("failed to write volume config")
+}
+
 /// Persists the sync folder so future launches use it instead of iCloud auto-detection.
 pub fn write_sync_folder_config(folder: &Path) -> Result<()> {
     let config_path =

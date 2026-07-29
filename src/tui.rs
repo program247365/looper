@@ -76,6 +76,10 @@ pub struct AppState {
     /// `frame_count` at the moment `l` armed the loop; drives the ~1s vortex
     /// animation in the visualizer. `None` once the animation has played out.
     pub loop_anim_start: Option<u64>,
+    /// Linear amplitude applied to the rodio sink (`-`/`+`), shown in the
+    /// footer. Software gain below the OS mixer, so it trims finer than the
+    /// coarse hardware steps USB audio devices expose.
+    pub volume: f32,
 }
 
 /// Clickable region of the rendered progress bar. The track spans columns
@@ -1346,6 +1350,8 @@ fn draw_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &
         spans.push(Span::raw(" Loop   "));
     }
     spans.extend([
+        Span::styled("[-/+]", Style::default().fg(Color::Rgb(255, 160, 50))),
+        Span::raw(format!(" Vol {:.0}%   ", state.volume * 100.0)),
         Span::styled("[p]", Style::default().fg(Color::Rgb(255, 160, 50))),
         Span::raw(" Played   "),
         Span::styled("[q]", Style::default().fg(Color::Rgb(255, 160, 50))),
@@ -1921,6 +1927,7 @@ mod tests {
             loop_armed: false,
             solo_loop: false,
             loop_anim_start: None,
+            volume: 1.0,
         }
     }
 
