@@ -342,3 +342,6 @@ When changing remote playback:
 - service-specific restrictions can break public URLs without any Rust-side regression
 - terminal restore correctness matters whenever touching loading/playback state transitions
 - the worktree may contain user changes; do not revert unrelated modifications
+- `docs/maintenance.md` tracks dependency watch items (the `block v0.1.6`
+  future-incompat warning via souvlaki, the vergen pin) — check it on
+  toolchain or dependency bumps
