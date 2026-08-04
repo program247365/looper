@@ -28,6 +28,7 @@ use crate::download::{DownloadEvent, LoadingPhase};
 use crate::media_controls::MediaSessionHandle;
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, hypem, ytdlp, TrackInfo};
+use crate::quips::startup_quip;
 use crate::storage::{
     collection_record, read_volume_config, track_record, write_volume_config, SharedStorage,
     Storage, SyncWarning,
@@ -96,8 +97,8 @@ fn browse_history_session(
     picker: Option<&Picker>,
 ) -> Result<()> {
     let mut startup = StartupScreenState {
-        status: "db migrations... teaching SQLite to keep a beat".to_string(),
-        logs: startup_logs(),
+        status: "opening your history...".to_string(),
+        quip: startup_quip().to_string(),
         frame_count: 0,
         progress: None,
         sync_warning: None,
@@ -350,8 +351,8 @@ fn play_file_session(
 ) -> Result<SessionOutcome> {
     let mut current_url = initial_url.to_string();
     let mut startup = StartupScreenState {
-        status: "db migrations... teaching SQLite to keep a beat".to_string(),
-        logs: startup_logs(),
+        status: "opening your history...".to_string(),
+        quip: startup_quip().to_string(),
         frame_count: 0,
         progress: Some(StartupProgressState {
             label: "opening local history".to_string(),
@@ -499,11 +500,7 @@ fn resolve_url_with_startup(
 
     loop {
         startup.frame_count += 1;
-        startup.status = format!(
-            "loading song... bribing the aux cord for `{}`",
-            truncate_title(current_url, 72)
-        );
-        startup.logs = startup_logs();
+        startup.status = format!("looking up `{}`...", truncate_title(current_url, 72));
         startup.progress = Some(StartupProgressState {
             label: "resolving source".to_string(),
             progress: None,
@@ -1657,7 +1654,6 @@ fn play_single_track(
         is_playlist,
         LoadingPhase::Finalizing,
         None,
-        "patching cables into the tiny disco".to_string(),
         0,
         sync_warning,
     )?;
@@ -1942,7 +1938,6 @@ fn prepare_track_for_playback(
     let mut frame_count = 0_u64;
     let mut phase = LoadingPhase::Resolving;
     let mut progress = None;
-    let mut note = "reading the tea leaves in remote metadata".to_string();
 
     loop {
         frame_count += 1;
@@ -1955,7 +1950,6 @@ fn prepare_track_for_playback(
             is_playlist,
             phase.clone(),
             progress.clone(),
-            note.clone(),
             frame_count,
             sync_warning,
         )?;
@@ -1965,11 +1959,9 @@ fn prepare_track_for_playback(
                 DownloadEvent::Progress(next_progress) => {
                     progress = Some(next_progress);
                     phase = LoadingPhase::Downloading;
-                    note = "teaching bytes to moonwalk into the cache".to_string();
                 }
                 DownloadEvent::Finalizing => {
                     phase = LoadingPhase::Finalizing;
-                    note = "teaching ffmpeg some manners before showtime".to_string();
                 }
                 DownloadEvent::Ready(path) => {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -1989,7 +1981,6 @@ fn prepare_track_for_playback(
                         is_playlist,
                         LoadingPhase::Error(message.clone()),
                         progress.clone(),
-                        message.clone(),
                         frame_count,
                         sync_warning,
                     )?;
@@ -2041,7 +2032,6 @@ fn wait_for_player_ready(
             is_playlist,
             LoadingPhase::Ready,
             None,
-            "priming the speakers so the first hit lands clean".to_string(),
             frame_count,
             sync_warning,
         )?;
@@ -2058,7 +2048,6 @@ fn render_track_startup(
     is_playlist: bool,
     phase: LoadingPhase,
     progress: Option<crate::download::DownloadProgress>,
-    note: String,
     frame_count: u64,
     sync_warning: Option<&SyncWarning>,
 ) -> Result<()> {
@@ -2066,7 +2055,7 @@ fn render_track_startup(
     let status = startup_status(track, track_index, total_tracks, is_playlist, &phase);
     let startup = StartupScreenState {
         status,
-        logs: track_startup_logs(note),
+        quip: startup_quip().to_string(),
         frame_count,
         progress: Some(StartupProgressState {
             label: loading_phase_label(&phase).to_string(),
@@ -2114,14 +2103,6 @@ fn loading_phase_label(phase: &LoadingPhase) -> &'static str {
     }
 }
 
-fn track_startup_logs(note: String) -> Vec<String> {
-    vec![
-        note,
-        "checking that the beat and the database remain legally married".to_string(),
-        "keeping the stage curtains closed until audio is actually ready".to_string(),
-    ]
-}
-
 fn format_playback_title(frame_count: u64, title: &str, paused: bool) -> String {
     let title = truncate_title(title, 48);
     if paused {
@@ -2156,15 +2137,6 @@ fn write_terminal_title(title: &str) -> Result<()> {
     write!(out, "\x1b]0;{}\x07", title)?;
     out.flush()?;
     Ok(())
-}
-
-fn startup_logs() -> Vec<String> {
-    vec![
-        "warming up the loop engine".to_string(),
-        "convincing sqlite this is definitely a music venue".to_string(),
-        "dusting fingerprints off the play count ledger".to_string(),
-        "aligning vibes, bits, and questionable dance moves".to_string(),
-    ]
 }
 
 #[cfg(test)]

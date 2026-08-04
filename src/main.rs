@@ -10,6 +10,7 @@ mod media_controls;
 mod play_loop;
 mod playback_input;
 mod plugin;
+mod quips;
 mod schema;
 mod spotify;
 mod startup_logo;

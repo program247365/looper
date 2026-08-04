@@ -229,7 +229,7 @@ pub fn prev_item(entries: &[SearchEntry], from: usize) -> usize {
 #[derive(Clone)]
 pub struct StartupScreenState {
     pub status: String,
-    pub logs: Vec<String>,
+    pub quip: String,
     pub frame_count: u64,
     pub progress: Option<StartupProgressState>,
     pub sync_warning: Option<SyncWarning>,
@@ -402,7 +402,7 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
         area.width
     }
     .min(118);
-    let panel = centered_area(area, panel_width, 22);
+    let panel = centered_area(area, panel_width, 18);
     let panel_block = Block::default()
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Rgb(60, 60, 80)));
@@ -434,26 +434,18 @@ pub fn draw_startup(frame: &mut ratatui::Frame, state: &StartupScreenState) {
 
     draw_startup_status(frame, chunks[1], state);
 
-    let log_lines = state
-        .logs
-        .iter()
-        .map(|line| {
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled("•", Style::default().fg(Color::Rgb(255, 160, 50))),
-                Span::raw("  "),
-                Span::styled(line, Style::default().fg(Color::Rgb(180, 180, 200))),
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let logs_block = Block::default()
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Rgb(40, 40, 60)));
     frame.render_widget(
-        Paragraph::new(log_lines)
-            .block(logs_block)
-            .alignment(Alignment::Left),
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    state.quip.as_str(),
+                    Style::default().fg(Color::Rgb(130, 128, 150)),
+                ),
+            ]),
+        ])
+        .alignment(Alignment::Left),
         chunks[2],
     );
 }
@@ -2124,7 +2116,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let state = StartupScreenState {
             status: "loading".into(),
-            logs: vec!["warming up".into()],
+            quip: "warming up".into(),
             frame_count: 0,
             progress: None,
             sync_warning: Some(sample_warning()),
@@ -2195,7 +2187,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let state = StartupScreenState {
             status: "loading".into(),
-            logs: vec!["warming up".into()],
+            quip: "warming up".into(),
             frame_count: 0,
             progress: None,
             sync_warning: None,
@@ -2210,10 +2202,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let state = StartupScreenState {
             status: "single track • YouTube • downloading `song`".into(),
-            logs: vec![
-                "teaching bytes to moonwalk into the cache".into(),
-                "keeping the stage curtains closed until audio is actually ready".into(),
-            ],
+            quip: "teaching bytes to moonwalk into the cache".into(),
             frame_count: 12,
             progress: Some(StartupProgressState {
                 label: "downloading audio".into(),

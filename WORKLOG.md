@@ -359,3 +359,22 @@
   `l` loop-this-track, `d` delete in the history panel, Favorites sort field.
   README highlights and quick-start now mention volume.
 - Revisit next time: nothing pending from this session.
+
+## 2026-08-04: Startup screen cleanup — one random quip, honest statuses
+
+- The boot screen's 4-line joke box was static (all four lines every launch);
+  replaced with a single random quip per launch. Pool of 14 sayings (original
+  4 + 10 new, curated one-by-one) lives in new `src/quips.rs` as a const
+  slice; `startup_quip()` uses `OnceLock` so per-frame redraws don't strobe
+  new jokes.
+- Statuses now say what's happening: "opening your history..." (was
+  "db migrations... teaching SQLite to keep a beat" — real work, wrong label:
+  it's the replica pull + DB open; migrations no-op after first run) and
+  "looking up `url`..." (was "bribing the aux cord"). Dropped the `note`
+  filler-line plumbing through `render_track_startup`.
+- Startup panel shrunk 22 → 18 rows; quip renders as one dim line under the
+  status box. Decided via an artifact options page (chose option B over
+  minimal / real-boot-checklist).
+- Revisit next time: option C's idea — move `open_and_migrate()` off the
+  render thread so the spinner animates during the boot wait; per-source
+  quips could key off the service.
