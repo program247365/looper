@@ -378,3 +378,19 @@
 - Revisit next time: option C's idea — move `open_and_migrate()` off the
   render thread so the spinner animates during the boot wait; per-source
   quips could key off the service.
+
+## 2026-08-04: Removed the legacy iCloud pull that could hang boot forever
+
+- `cargo run` froze at "opening your history...": the v0.5.4-era "one-time"
+  iCloud migration in `open_and_migrate()` ran every boot, and the disk-full
+  cleanup earlier today left the old iCloud DB dataless (evicted). SQLite's
+  `pread` blocked in-kernel waiting on a wedged iCloud download, on the main
+  thread, before input handling started (Ctrl-C dead under raw mode).
+- Diagnosed with `sample` (all frames in `pread` under
+  `try_pull_from_replica` → `establish_connection`), unstuck the machine by
+  restarting `bird` and `brctl download`-ing the three DB files.
+- Fix: deleted the legacy path entirely — local DB long supersedes it;
+  replica pull now happens only with an explicit `sync_folder` config.
+- Revisit next time: startup still does blocking I/O on the render thread;
+  moving `open_and_migrate()` to a worker (option C's idea) would keep the
+  UI responsive under any future storage stall.

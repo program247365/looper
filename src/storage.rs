@@ -193,16 +193,7 @@ impl Storage {
                     reason: err.to_string(),
                 }),
             },
-            None => {
-                // One-time legacy migration for users upgrading from v0.5.4 and earlier:
-                // their history lives in the old iCloud auto-detected path. Pull silently
-                // if that path exists and the local DB has no newer data.
-                #[cfg(target_os = "macos")]
-                if let Some(legacy) = legacy_icloud_db_path() {
-                    let _ = try_pull_from_replica(&legacy, &local_path);
-                }
-                None
-            }
+            None => None,
         };
 
         let storage = Self::open_and_migrate_at(local_path)?;
@@ -621,17 +612,6 @@ fn checkpoint_db(path: &Path) -> Result<()> {
     conn.batch_execute("PRAGMA wal_checkpoint(TRUNCATE);")
         .map_err(|e| eyre!("WAL checkpoint failed: {e}"))?;
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn legacy_icloud_db_path() -> Option<PathBuf> {
-    let home = directories::UserDirs::new()?.home_dir().to_path_buf();
-    let path = home.join("Library/Mobile Documents/com~apple~CloudDocs/looper/looper.sqlite3");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
 }
 
 fn sync_folder_config_path() -> Option<PathBuf> {
