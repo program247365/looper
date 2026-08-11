@@ -394,3 +394,27 @@
 - Revisit next time: startup still does blocking I/O on the render thread;
   moving `open_and_migrate()` to a worker (option C's idea) would keep the
   UI responsive under any future storage stall.
+
+## 2026-08-11: In-TUI Spotify re-login recovery flow
+- A dead Spotify login (expired/revoked cached credentials) used to show
+  the generic "track may be private, removed, or region-locked" modal —
+  the resolver's real error was discarded (`Failed(_message)`), a dead
+  end requiring a manual `looper spotify login`.
+- Now: `connect_session` classifies librespot connect errors (kind
+  `PermissionDenied`/`Unauthenticated`, or missing credentials) into a
+  typed `SpotifyAuthError`; the resolver thread carries the distinction
+  (`ResolveFailure`) instead of flattening to String; the TUI shows a
+  "Spotify login needed" modal — enter runs the OAuth browser flow on a
+  background thread (spinner + fallback auth URL, esc cancels), then
+  re-resolves and plays the originally requested URL.
+- New `src/spotify/login.rs` drives the PKCE flow directly with `oauth2`
+  (librespot-oauth dropped as a direct dep): auth URL displayable, no
+  stdout writes under the TUI, cancellable non-blocking listener on 8898,
+  OAuth `state` verified (security review catch). oauth2 needs
+  `default-features = false` or it drags in a second TLS stack (rustls/
+  ring/quinn) — librespot-oauth does the same. Generic resolve failures
+  now show the real error message in the modal too.
+- Revisit next time: mid-playlist auth death still only fails with a
+  clear message (no modal — it's at the track boundary, out of the
+  resolve rail); manual smoke test of the full browser flow still to be
+  done by Kevin (creds file aside → modal → enter → browser → resume).
