@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
     Terminal,
 };
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
@@ -697,6 +697,115 @@ pub fn draw_replay_error(frame: &mut ratatui::Frame, title: &str, detail: &str) 
         .title(" track unavailable ")
         .style(Style::default().fg(Color::Rgb(170, 90, 90)));
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Modal shown when resolve failed because the Spotify login is dead.
+pub fn draw_spotify_login_prompt(frame: &mut ratatui::Frame, detail: &str) {
+    frame.render_widget(Clear, frame.area());
+    let area = centered_area(frame.area(), 66, 9);
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "♪  Spotify login needed",
+            Style::default()
+                .fg(Color::Rgb(120, 220, 130))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Your Spotify login has expired or been revoked.",
+            Style::default()
+                .fg(Color::Rgb(230, 230, 240))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            detail.to_string(),
+            Style::default().fg(Color::Rgb(170, 170, 190)),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[enter]",
+                Style::default()
+                    .fg(Color::Rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " log in again    ",
+                Style::default().fg(Color::Rgb(150, 150, 170)),
+            ),
+            Span::styled(
+                "[any key]",
+                Style::default()
+                    .fg(Color::Rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" back    ", Style::default().fg(Color::Rgb(150, 150, 170))),
+            Span::styled(
+                "[q]",
+                Style::default()
+                    .fg(Color::Rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" quit", Style::default().fg(Color::Rgb(150, 150, 170))),
+        ]),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" spotify login ")
+        .style(Style::default().fg(Color::Rgb(90, 150, 100)));
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The in-progress login screen: spinner + phase, with the auth URL as a
+/// fallback if the browser didn't open.
+pub struct SpotifyLoginScreenState {
+    pub phase_label: String,
+    pub auth_url: Option<String>,
+    pub frame_count: u64,
+}
+
+pub fn draw_spotify_login_wait(frame: &mut ratatui::Frame, state: &SpotifyLoginScreenState) {
+    const SPINNER: [char; 4] = ['◐', '◓', '◑', '◒'];
+    let spinner = SPINNER[(state.frame_count / 4) as usize % SPINNER.len()];
+    frame.render_widget(Clear, frame.area());
+    let area = centered_area(frame.area(), 76, 12);
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            format!("{spinner}  {}", state.phase_label),
+            Style::default()
+                .fg(Color::Rgb(120, 220, 130))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+    ];
+    if let Some(auth_url) = &state.auth_url {
+        lines.push(Line::from(vec![Span::styled(
+            "A browser window should have opened. If not, open:",
+            Style::default().fg(Color::Rgb(170, 170, 190)),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            auth_url.to_string(),
+            Style::default().fg(Color::Rgb(150, 170, 220)),
+        )]));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(
+            "[esc]",
+            Style::default()
+                .fg(Color::Rgb(255, 180, 80))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" cancel", Style::default().fg(Color::Rgb(150, 150, 170))),
+    ]));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" spotify login ")
+        .style(Style::default().fg(Color::Rgb(90, 150, 100)));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(block),
+        area,
+    );
 }
 
 pub fn draw_history_browser(
