@@ -374,8 +374,27 @@ fn play_file_session(
                     push_replica_best_effort(&storage);
                     return Ok(SessionOutcome::Quit);
                 }
-                ResolveStartupOutcome::Failed(_message) => {
-                    handle_unresolvable_replay(terminal, title_state, &storage, &current_url)?;
+                ResolveStartupOutcome::Failed(message) => {
+                    handle_unresolvable_replay(
+                        terminal,
+                        title_state,
+                        &storage,
+                        &current_url,
+                        &message,
+                    )?;
+                    push_replica_best_effort(&storage);
+                    return Ok(SessionOutcome::BackToHistory);
+                }
+                ResolveStartupOutcome::SpotifyLoginRequired(message) => {
+                    // Until the login flow is wired up, fall back to the
+                    // generic modal so the build stays shippable.
+                    handle_unresolvable_replay(
+                        terminal,
+                        title_state,
+                        &storage,
+                        &current_url,
+                        &message,
+                    )?;
                     push_replica_best_effort(&storage);
                     return Ok(SessionOutcome::BackToHistory);
                 }
@@ -447,6 +466,16 @@ enum ResolveStartupOutcome {
     /// region-locked, expired live stream). Recoverable: surface it in the TUI
     /// instead of crashing the whole app.
     Failed(String),
+    /// Resolve failed because the Spotify login is dead; offer re-login.
+    SpotifyLoginRequired(String),
+}
+
+/// Why the resolver thread failed, classified before the error is flattened
+/// to a string so the auth case can offer re-login.
+enum ResolveFailure {
+    /// The Spotify login is missing/expired/revoked; payload is the detail.
+    AuthRequired(String),
+    Other(String),
 }
 
 /// Shows a non-fatal modal when a history entry can't be resolved, and lets the
@@ -456,6 +485,7 @@ fn handle_unresolvable_replay(
     title_state: &mut TitleState,
     storage: &SharedStorage,
     replay_target: &str,
+    message: &str,
 ) -> Result<()> {
     let title = storage
         .lock()
@@ -463,11 +493,15 @@ fn handle_unresolvable_replay(
         .title_for_replay_target(replay_target)?
         .unwrap_or_else(|| replay_target.to_string());
     let title = truncate_title(&title, 60);
-    let detail = "This track may be private, removed, or region-locked.";
+    let detail = if message.is_empty() {
+        "This track may be private, removed, or region-locked.".to_string()
+    } else {
+        truncate_title(message, 62)
+    };
     title_state.set("looper — track unavailable".to_string())?;
 
     loop {
-        terminal.draw(|frame| draw_replay_error(frame, &title, detail))?;
+        terminal.draw(|frame| draw_replay_error(frame, &title, &detail))?;
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
@@ -494,7 +528,11 @@ fn resolve_url_with_startup(
     let (sender, receiver) = mpsc::channel();
     let url = current_url.to_string();
     thread::spawn(move || {
-        let result = plugin::resolve_url(&url).map_err(|err| err.to_string());
+        let result =
+            plugin::resolve_url(&url).map_err(|err| match crate::spotify::auth_error(&err) {
+                Some(detail) => ResolveFailure::AuthRequired(detail),
+                None => ResolveFailure::Other(err.to_string()),
+            });
         let _ = sender.send(result);
     });
 
@@ -513,7 +551,12 @@ fn resolve_url_with_startup(
                 startup.progress = None;
                 return Ok(ResolveStartupOutcome::Resolved(resolved));
             }
-            Ok(Err(message)) => return Ok(ResolveStartupOutcome::Failed(message)),
+            Ok(Err(ResolveFailure::AuthRequired(detail))) => {
+                return Ok(ResolveStartupOutcome::SpotifyLoginRequired(detail))
+            }
+            Ok(Err(ResolveFailure::Other(message))) => {
+                return Ok(ResolveStartupOutcome::Failed(message))
+            }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 return Err(color_eyre::eyre::eyre!(
