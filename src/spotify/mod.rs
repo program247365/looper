@@ -410,20 +410,56 @@ fn session() -> Result<Session> {
     Ok(slot.as_ref().expect("session connected above").clone())
 }
 
-/// Connect a fresh session from cached OAuth credentials (no re-login needed —
-/// the cached credential is long-lived). `Session::new` calls
-/// `Handle::current()`, so it must be built inside the runtime.
+/// The cached Spotify login is missing, expired, or revoked. Typed so the TUI
+/// can offer re-login instead of the generic "track unavailable" modal.
+#[derive(Debug)]
+pub struct SpotifyAuthError(pub String);
+
+impl std::fmt::Display for SpotifyAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SpotifyAuthError {}
+
+/// The auth-failure message if `err`'s chain contains a [`SpotifyAuthError`].
+pub fn auth_error(err: &color_eyre::eyre::Report) -> Option<String> {
+    err.chain()
+        .find_map(|e| e.downcast_ref::<SpotifyAuthError>())
+        .map(|e| e.0.clone())
+}
+
+/// librespot maps LoginFailed → PermissionDenied and other auth failures →
+/// Unauthenticated; those mean the saved login is dead. Everything else
+/// (network down, AP unreachable) keeps its generic wording.
+fn classify_connect_error(e: librespot_core::Error) -> color_eyre::eyre::Report {
+    use librespot_core::error::ErrorKind;
+    match e.kind {
+        ErrorKind::PermissionDenied | ErrorKind::Unauthenticated => {
+            color_eyre::eyre::Report::new(SpotifyAuthError(format!(
+                "Spotify rejected the saved login: {e}"
+            )))
+        }
+        _ => eyre!("failed to connect to Spotify: {e}"),
+    }
+}
+
+/// Connect a fresh session from cached OAuth credentials. Auth failures
+/// (missing/expired/revoked credentials) surface as [`SpotifyAuthError`] so the
+/// TUI can offer re-login. `Session::new` calls `Handle::current()`, so it must
+/// be built inside the runtime.
 fn connect_session(runtime: &Runtime) -> Result<Session> {
     let cache = open_cache()?;
-    let credentials = cache
-        .credentials()
-        .ok_or_else(|| eyre!("not logged in to Spotify — run `looper spotify login` first"))?;
+    let credentials = cache.credentials().ok_or_else(|| {
+        color_eyre::eyre::Report::new(SpotifyAuthError("not logged in to Spotify".to_string()))
+    })?;
     runtime
         .block_on(async move {
             let session = Session::new(SessionConfig::default(), Some(cache));
             session.connect(credentials, true).await.map(|()| session)
         })
-        .wrap_err("failed to connect to Spotify (is your Premium login still valid?)")
+        .map_err(classify_connect_error)
 }
 
 fn open_cache() -> Result<Cache> {
@@ -499,6 +535,28 @@ mod tests {
             uri.to_uri().unwrap(),
             "spotify:track:4uLU6hMCjMI75M1A2tKUQC"
         );
+    }
+
+    #[test]
+    fn classifies_auth_kinds_as_auth_errors() {
+        let denied = classify_connect_error(librespot_core::Error::permission_denied("bad creds"));
+        assert!(auth_error(&denied).is_some());
+
+        let unauth = classify_connect_error(librespot_core::Error::unauthenticated("token dead"));
+        assert!(auth_error(&unauth).is_some());
+    }
+
+    #[test]
+    fn network_failures_are_not_auth_errors() {
+        let network = classify_connect_error(librespot_core::Error::unavailable("no route"));
+        assert!(auth_error(&network).is_none());
+        assert!(network.to_string().contains("failed to connect to Spotify"));
+    }
+
+    #[test]
+    fn auth_error_carries_its_message() {
+        let report = color_eyre::eyre::Report::new(SpotifyAuthError("not logged in".into()));
+        assert_eq!(auth_error(&report).as_deref(), Some("not logged in"));
     }
 
     #[test]
