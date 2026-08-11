@@ -418,3 +418,4 @@
   clear message (no modal — it's at the track boundary, out of the
   resolve rail); manual smoke test of the full browser flow still to be
   done by Kevin (creds file aside → modal → enter → browser → resume).
+- Released as v0.14.3: tag + arm64 CI binary + Homebrew tap formula updated.
