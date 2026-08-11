@@ -75,7 +75,7 @@ fn run_login(tx: &Sender<LoginPhase>, cancel: &AtomicBool) -> Result<String> {
         .set_redirect_uri(RedirectUrl::new(OAUTH_REDIRECT_URI.to_string())?);
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let (auth_url, _csrf) = client
+    let (auth_url, csrf) = client
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new("streaming".to_string()))
         .set_pkce_challenge(pkce_challenge)
@@ -107,8 +107,13 @@ fn run_login(tx: &Sender<LoginPhase>, cancel: &AtomicBool) -> Result<String> {
     BufReader::new(&stream)
         .read_line(&mut request_line)
         .map_err(|e| eyre!("failed to read the Spotify redirect: {e}"))?;
-    let code = code_from_request_line(&request_line)
+    let (code, state) = code_and_state_from_request_line(&request_line)
         .ok_or_else(|| eyre!("the Spotify redirect didn't include an auth code"))?;
+    // Reject a forged redirect (e.g. a malicious local page hitting the
+    // listener with an attacker's code): the state must round-trip.
+    if state.as_deref() != Some(csrf.secret().as_str()) {
+        return Err(eyre!("the Spotify redirect failed the state check"));
+    }
 
     let body = "Logged in - you can close this tab and go back to looper.";
     let response = format!(
@@ -128,14 +133,22 @@ fn run_login(tx: &Sender<LoginPhase>, cancel: &AtomicBool) -> Result<String> {
     super::connect_with_token(token.access_token().secret().to_string())
 }
 
-/// Extract the `code` query parameter from the redirect request line
-/// (`GET /login?code=... HTTP/1.1`).
-fn code_from_request_line(line: &str) -> Option<String> {
+/// Extract the `code` and `state` query parameters from the redirect request
+/// line (`GET /login?code=...&state=... HTTP/1.1`). `None` without a code;
+/// the caller verifies the state against the CSRF token it generated.
+fn code_and_state_from_request_line(line: &str) -> Option<(String, Option<String>)> {
     let path = line.split_whitespace().nth(1)?;
     let url = url::Url::parse(&format!("http://localhost{path}")).ok()?;
-    url.query_pairs()
-        .find(|(key, _)| key == "code")
-        .map(|(_, value)| value.into_owned())
+    let mut code = None;
+    let mut state = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    Some((code?, state))
 }
 
 #[cfg(test)]
@@ -143,15 +156,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_code_from_redirect_request() {
+    fn extracts_code_and_state_from_redirect_request() {
         assert_eq!(
-            code_from_request_line("GET /login?code=AQBzk3example&state=xyz HTTP/1.1\r\n"),
-            Some("AQBzk3example".to_string())
+            code_and_state_from_request_line("GET /login?code=AQBzk3example&state=xyz HTTP/1.1\r\n"),
+            Some(("AQBzk3example".to_string(), Some("xyz".to_string())))
         );
         assert_eq!(
-            code_from_request_line("GET /login?error=access_denied HTTP/1.1\r\n"),
+            code_and_state_from_request_line("GET /login?code=AQBzk3example HTTP/1.1\r\n"),
+            Some(("AQBzk3example".to_string(), None))
+        );
+        assert_eq!(
+            code_and_state_from_request_line("GET /login?error=access_denied HTTP/1.1\r\n"),
             None
         );
-        assert_eq!(code_from_request_line(""), None);
+        assert_eq!(code_and_state_from_request_line(""), None);
     }
 }
