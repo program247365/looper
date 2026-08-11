@@ -2785,9 +2785,10 @@ dependencies = [
  "libc",
  "librespot-core",
  "librespot-metadata",
- "librespot-oauth",
  "librespot-playback",
+ "oauth2",
  "objc",
+ "open",
  "ratatui",
  "ratatui-image",
  "reqwest",
@@ -2802,6 +2803,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "url",
 ]
 
 [[package]]

@@ -10,9 +10,11 @@
 //! metadata resolution and playback. Credentials come from an OAuth login run
 //! once via `looper spotify login`.
 
+mod login;
 mod search;
 mod sink;
 
+pub use login::{start_login, LoginPhase};
 pub use search::{artist_albums, is_artist_uri, search, Discography, SearchItem, SearchResults};
 
 use std::path::{Path, PathBuf};
@@ -29,7 +31,6 @@ use librespot_core::session::Session;
 use librespot_core::spotify_uri::SpotifyUri;
 use librespot_metadata::audio::AudioItem;
 use librespot_metadata::{Album, Metadata, Playlist, Track};
-use librespot_oauth::OAuthClientBuilder;
 use librespot_playback::config::PlayerConfig;
 use librespot_playback::mixer::NoOpVolume;
 use librespot_playback::player::{Player, PlayerEvent};
@@ -52,37 +53,27 @@ pub fn is_spotify_url(url: &str) -> bool {
     url.starts_with("spotify:") || url.contains("open.spotify.com")
 }
 
-/// Run the one-time OAuth browser flow and cache reusable credentials.
+/// Run the OAuth browser flow and cache reusable credentials (CLI path;
+/// the TUI drives [`start_login`] itself).
 pub fn login() -> Result<()> {
-    let config = SessionConfig::default();
-    println!("Opening your browser to authorize looper with Spotify...");
-    let token = OAuthClientBuilder::new(&config.client_id, OAUTH_REDIRECT_URI, vec!["streaming"])
-        .open_in_browser()
-        .build()
-        .map_err(|e| eyre!("failed to start Spotify OAuth flow: {e}"))?
-        .get_access_token()
-        .map_err(|e| eyre!("Spotify OAuth failed: {e}"))?;
-
-    let cache = open_cache()?;
-    let runtime = build_runtime()?;
-    // `Session::new` calls `Handle::current()`, so it must run inside the
-    // runtime. store_credentials = true persists reusable credentials into the
-    // cache so future runs skip the browser flow.
-    let session = runtime
-        .block_on(async move {
-            let session = Session::new(config, Some(cache));
-            session
-                .connect(Credentials::with_access_token(token.access_token), true)
-                .await
-                .map(|()| session)
-        })
-        .map_err(|e| eyre!("Spotify login failed (Premium required): {e}"))?;
-
-    println!(
-        "Logged in to Spotify as {}. Credentials cached — you won't need to do this again.",
-        session.username()
-    );
-    Ok(())
+    let handle = start_login();
+    loop {
+        match handle.phases.recv() {
+            Ok(LoginPhase::WaitingForBrowser { auth_url }) => {
+                println!("Opening your browser to authorize looper with Spotify...");
+                println!("If it doesn't open, browse to:\n{auth_url}");
+            }
+            Ok(LoginPhase::Connecting) => println!("Connecting to Spotify..."),
+            Ok(LoginPhase::Done(Ok(username))) => {
+                println!(
+                    "Logged in to Spotify as {username}. Credentials cached — you won't need to do this again."
+                );
+                return Ok(());
+            }
+            Ok(LoginPhase::Done(Err(message))) => return Err(eyre!(message)),
+            Err(_) => return Err(eyre!("Spotify login stopped unexpectedly")),
+        }
+    }
 }
 
 /// Resolve a Spotify URL/URI to playable tracks: a single track, or every
@@ -460,6 +451,28 @@ fn connect_session(runtime: &Runtime) -> Result<Session> {
             session.connect(credentials, true).await.map(|()| session)
         })
         .map_err(classify_connect_error)
+}
+
+/// Connect a brand-new session from a fresh OAuth access token, persist
+/// reusable credentials into the cache (`store_credentials = true`), and
+/// install the session into the shared slot so the next resolve reuses it.
+/// Returns the username.
+pub(crate) fn connect_with_token(access_token: String) -> Result<String> {
+    let ctx = ctx()?;
+    let cache = open_cache()?;
+    let session = ctx
+        .runtime
+        .block_on(async move {
+            let session = Session::new(SessionConfig::default(), Some(cache));
+            session
+                .connect(Credentials::with_access_token(access_token), true)
+                .await
+                .map(|()| session)
+        })
+        .map_err(|e| eyre!("Spotify login failed (Premium required): {e}"))?;
+    let username = session.username();
+    *ctx.session.lock().unwrap() = Some(session);
+    Ok(username)
 }
 
 fn open_cache() -> Result<Cache> {

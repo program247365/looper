@@ -51,8 +51,17 @@ tokio-util = "0.7"
 # re-pin with: cargo update -p vergen --precise 9.0.6
 librespot-core = "0.8"
 librespot-metadata = "0.8"
-librespot-oauth = "0.8"
 librespot-playback = { version = "0.8", default-features = false }
+# OAuth for `looper spotify login` and the in-TUI re-login flow. Driven
+# directly (not via librespot-oauth, which stays in the tree via
+# librespot-core) so the TUI can display the auth URL, cancel the redirect
+# listener cleanly, and avoid stray stdout writes. All three are already in
+# the tree transitively — same compiled versions. `default-features = false`
+# matches librespot-oauth's declaration: the default `rustls-tls` feature
+# would drag in a second TLS stack (ring/quinn) next to our native-tls.
+oauth2 = { version = "5.0", default-features = false, features = ["reqwest", "reqwest-blocking"] }
+open = "5"
+url = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.24"
