@@ -157,6 +157,19 @@ uses librespot:
   - `ensure_track_available()` uses librespot's `AudioItem` availability to fail
     a single unplayable track at resolve time, so `resolve_url_with_startup`
     surfaces the "track unavailable" modal instead of playing silence
+- `src/spotify/login.rs` — the OAuth PKCE flow, driven directly with the
+  `oauth2` crate (not `librespot-oauth`, which stays in the tree via
+  librespot-core; oauth2/open/url are direct deps with `default-features =
+  false` on oauth2 to keep the rustls stack out) so the TUI can display the
+  auth URL, nothing writes to stdout, and Esc cancels the port-8898 redirect
+  listener cleanly (non-blocking accept + cancel flag; the redirect's OAuth
+  `state` is verified). `start_login()` runs on a background thread and
+  streams `LoginPhase` over a channel; both the TUI recovery screen and
+  `looper spotify login` consume it. A dead login at resolve time surfaces as
+  a typed `SpotifyAuthError` (librespot connect errors with kind
+  `PermissionDenied`/`Unauthenticated`, or no cached credentials), which the
+  TUI turns into a "Spotify login needed" modal — `enter` re-logs-in in the
+  browser and then re-resolves the originally requested URL.
 - `src/spotify/search.rs` — catalog search via the public Web API
   (`/v1/search`). Spotify rejects Web API calls made with librespot-session
   tokens (429 on every endpoint; Mercury keymaster/searchview are retired), so
@@ -226,7 +239,14 @@ There are now two major UI modes:
   not touch its tracks (no membership is stored).
 - "track unavailable" modal (`draw_replay_error`) — non-fatal overlay shown when
   a replay target can't be resolved; `d` prunes the dead row, any other key
-  returns to the history browser.
+  returns to the history browser. Its detail line is the resolver's real error
+  message (falling back to the generic guess only when the message is empty).
+- "Spotify login needed" modal + login waiting screen
+  (`draw_spotify_login_prompt`, `draw_spotify_login_wait`) — shown instead of
+  the generic modal when resolve fails with a dead Spotify login. `enter`
+  starts the in-TUI OAuth flow (browser + spinner + fallback auth URL, `esc`
+  cancels back to the modal), success re-resolves and plays the original URL;
+  any other key returns to the history browser.
 - Spotify search overlay (`/` from playback or the history browser;
   `draw_search_overlay`). Query focus: type, Enter searches (one blocking Web
   API call; a "searching…" frame is drawn first), Esc closes. Results focus:
