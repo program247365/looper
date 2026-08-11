@@ -29,16 +29,17 @@ use crate::media_controls::MediaSessionHandle;
 use crate::playback_input::PlaybackInput;
 use crate::plugin::{self, hypem, ytdlp, TrackInfo};
 use crate::quips::startup_quip;
+use crate::spotify;
 use crate::storage::{
     collection_record, read_volume_config, track_record, write_volume_config, SharedStorage,
     Storage, SyncWarning,
 };
 use crate::tui::{
-    draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_startup, first_item,
-    flatten_discography, flatten_results, last_item, next_item, prev_item, restore_terminal,
-    setup_terminal, AppState, HistoryPanelState, ProgressTrack, SearchEntry, SearchFocus,
-    SearchPanelState, SearchStatus, StartupProgressState, StartupScreenState, HEADER_ART_ROWS,
-    N_BANDS,
+    draw, draw_history_browser, draw_replay_error, draw_search_overlay, draw_spotify_login_prompt,
+    draw_spotify_login_wait, draw_startup, first_item, flatten_discography, flatten_results,
+    last_item, next_item, prev_item, restore_terminal, setup_terminal, AppState, HistoryPanelState,
+    ProgressTrack, SearchEntry, SearchFocus, SearchPanelState, SearchStatus,
+    SpotifyLoginScreenState, StartupProgressState, StartupScreenState, HEADER_ART_ROWS, N_BANDS,
 };
 
 const SEEK_STEP: Duration = Duration::from_secs(5);
@@ -386,17 +387,19 @@ fn play_file_session(
                     return Ok(SessionOutcome::BackToHistory);
                 }
                 ResolveStartupOutcome::SpotifyLoginRequired(message) => {
-                    // Until the login flow is wired up, fall back to the
-                    // generic modal so the build stays shippable.
-                    handle_unresolvable_replay(
-                        terminal,
-                        title_state,
-                        &storage,
-                        &current_url,
-                        &message,
-                    )?;
-                    push_replica_best_effort(&storage);
-                    return Ok(SessionOutcome::BackToHistory);
+                    match handle_spotify_login(terminal, title_state, &message)? {
+                        // Login succeeded: re-resolve the same URL against the
+                        // fresh session and play what originally failed.
+                        LoginOutcome::Retry => continue,
+                        LoginOutcome::Back => {
+                            push_replica_best_effort(&storage);
+                            return Ok(SessionOutcome::BackToHistory);
+                        }
+                        LoginOutcome::Quit => {
+                            push_replica_best_effort(&storage);
+                            return Ok(SessionOutcome::Quit);
+                        }
+                    }
                 }
             };
 
@@ -513,6 +516,117 @@ fn handle_unresolvable_replay(
                         return Ok(());
                     }
                     _ => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
+enum LoginOutcome {
+    Retry,
+    Back,
+    Quit,
+}
+
+enum LoginScreenOutcome {
+    LoggedIn,
+    Cancelled,
+    Failed(String),
+    Quit,
+}
+
+/// The "Spotify login needed" modal: `enter` runs the browser OAuth flow,
+/// any other key returns to the history browser, `q`/Ctrl-C quits. A failed
+/// attempt loops back here with the failure as the detail line.
+fn handle_spotify_login(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+    detail: &str,
+) -> Result<LoginOutcome> {
+    let mut detail = truncate_title(detail, 62);
+    title_state.set("looper — Spotify login needed".to_string())?;
+    loop {
+        terminal.draw(|frame| draw_spotify_login_prompt(frame, &detail))?;
+        if event::poll(Duration::from_millis(30))? {
+            if let Event::Key(key) = event::read()? {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Enter, _) => {
+                        match run_spotify_login_screen(terminal, title_state)? {
+                            LoginScreenOutcome::LoggedIn => return Ok(LoginOutcome::Retry),
+                            LoginScreenOutcome::Cancelled => {
+                                title_state.set("looper — Spotify login needed".to_string())?;
+                            }
+                            LoginScreenOutcome::Failed(message) => {
+                                detail = truncate_title(&message, 62);
+                                title_state.set("looper — Spotify login needed".to_string())?;
+                            }
+                            LoginScreenOutcome::Quit => return Ok(LoginOutcome::Quit),
+                        }
+                    }
+                    (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        return Ok(LoginOutcome::Quit)
+                    }
+                    _ => return Ok(LoginOutcome::Back),
+                }
+            }
+        }
+    }
+}
+
+/// Drive one OAuth login attempt: a background thread does the work, this
+/// loop animates the waiting screen and polls its phase channel (the same
+/// pattern as the resolver thread in `resolve_url_with_startup`). Esc cancels
+/// — the flag makes the listener thread exit and free port 8898.
+fn run_spotify_login_screen(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    title_state: &mut TitleState,
+) -> Result<LoginScreenOutcome> {
+    let handle = spotify::start_login();
+    let mut screen = SpotifyLoginScreenState {
+        phase_label: "starting Spotify login...".to_string(),
+        auth_url: None,
+        frame_count: 0,
+    };
+    title_state.set("looper — Spotify login".to_string())?;
+    loop {
+        screen.frame_count += 1;
+        terminal.draw(|frame| draw_spotify_login_wait(frame, &screen))?;
+
+        match handle.phases.try_recv() {
+            Ok(spotify::LoginPhase::WaitingForBrowser { auth_url }) => {
+                screen.phase_label = "finish logging in to Spotify in your browser...".to_string();
+                screen.auth_url = Some(auth_url);
+            }
+            Ok(spotify::LoginPhase::Connecting) => {
+                screen.phase_label = "connecting to Spotify...".to_string();
+                screen.auth_url = None;
+            }
+            Ok(spotify::LoginPhase::Done(Ok(_username))) => {
+                return Ok(LoginScreenOutcome::LoggedIn)
+            }
+            Ok(spotify::LoginPhase::Done(Err(message))) => {
+                return Ok(LoginScreenOutcome::Failed(message))
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                return Ok(LoginScreenOutcome::Failed(
+                    "Spotify login stopped unexpectedly".to_string(),
+                ))
+            }
+        }
+
+        if event::poll(Duration::from_millis(30))? {
+            if let Event::Key(key) = event::read()? {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Esc, _) => {
+                        handle.cancel();
+                        return Ok(LoginScreenOutcome::Cancelled);
+                    }
+                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        handle.cancel();
+                        return Ok(LoginScreenOutcome::Quit);
+                    }
+                    _ => {}
                 }
             }
         }
